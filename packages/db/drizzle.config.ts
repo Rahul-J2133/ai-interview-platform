@@ -23,3 +23,7 @@ export default {
   verbose: true,
   strict: true,
 } satisfies Config;
+
+// npx drizzle-kit studio/
+// docker exec -it interview_postgres psql -U postgres -d interview_platform -c "SELECT * FROM users;"
+// docker compose --profile tools up -d
