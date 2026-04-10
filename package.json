@@ -1,0 +1,29 @@
+{
+  "name": "ai-interview-platform",
+  "version": "1.0.0",
+  "private": true,
+  "workspaces": [
+    "apps/*",
+    "packages/*"
+  ],
+  "scripts": {
+    "dev": "turbo run dev",
+    "build": "turbo run build",
+    "db:generate": "turbo run db:generate",
+    "db:migrate": "turbo run db:migrate",
+    "db:push": "turbo run db:push",
+    "lint": "turbo run lint",
+    "type-check": "turbo run type-check"
+  },
+  "devDependencies": {
+    "@types/node": "^20.0.0",
+    "eslint": "^8.57.0",
+    "prettier": "^3.2.0",
+    "turbo": "^2.9.6",
+    "typescript": "^5.4.0"
+  },
+  "engines": {
+    "node": ">=20.0.0"
+  },
+  "packageManager": "npm@11.8.0"
+}

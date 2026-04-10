@@ -1,0 +1,26 @@
+{
+  "extends": "../../tsconfig.json",
+  "compilerOptions": {
+    // "outDir": "./dist",
+    // "rootDir": "./src",
+    // "rootDir": "ai-interview-platform",
+    "module": "ESNext",
+    "moduleResolution": "Bundler",
+    "target": "ESNext",
+    "lib": ["ES2022"],
+    "esModuleInterop": true,
+    "allowSyntheticDefaultImports": true,
+    "resolveJsonModule": true,
+    "strict": true,
+    "skipLibCheck": true,
+    "paths": {
+      "@interview/shared-types": ["../../packages/shared-types/src"],
+      "@interview/db": ["../../packages/db/src"],
+      "@interview/state-machines": ["../../packages/state-machines/src"],
+      "@interview/ai-engine": ["../../packages/ai-engine/src"],
+      "@interview/doc-parser": ["../../packages/doc-parser/src"]
+    }
+  },
+  "include": ["src/**/*"],
+  "exclude": ["node_modules", "dist"]
+}

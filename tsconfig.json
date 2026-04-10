@@ -1,0 +1,24 @@
+{
+  "compilerOptions": {
+    "target": "ES2022",
+    "lib": ["ES2022"],
+    "module": "node16",
+    "moduleResolution": "node16",
+    "strict": true,
+    "esModuleInterop": true,
+    "allowSyntheticDefaultImports": true,
+    "skipLibCheck": true,
+    "forceConsistentCasingInFileNames": true,
+    "resolveJsonModule": true,
+    "declaration": true,
+    "declarationMap": true,
+    "sourceMap": true,
+    "paths": {
+      "@interview/shared-types": ["./packages/shared-types/src"],
+      "@interview/db": ["./packages/db/src"],
+      "@interview/state-machines": ["./packages/state-machines/src"],
+      "@interview/ai-engine": ["./packages/ai-engine/src"],
+      "@interview/doc-parser": ["./packages/doc-parser/src"]
+    }
+  }
+}

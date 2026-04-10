@@ -1,0 +1,19 @@
+{
+  "name": "@interview/state-machines",
+  "version": "1.0.0",
+  "private": true,
+  "main": "./src/index.ts",
+  "types": "./src/index.ts",
+  "type": "module",
+  "exports": {
+    ".": "./src/index.ts",
+    "./system-design": "./src/system-design/machine.ts",
+    "./behavioral": "./src/behavioral/machine.ts",
+    "./domain-knowledge": "./src/domain-knowledge/machine.ts",
+    "./shared": "./src/shared/index.ts"
+  },
+  "dependencies": {
+    "xstate": "^5.14.0",
+    "@interview/shared-types": "*"
+  }
+}
