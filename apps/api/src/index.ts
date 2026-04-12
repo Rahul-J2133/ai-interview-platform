@@ -8,6 +8,9 @@
 
 import "./lib/env"; // ← FIRST — loads .env before anything else
 
+import * as Sentry from "@sentry/node";
+import { initSentry } from "./sentry";
+
 import { serve } from "@hono/node-server";
 import { Hono } from "hono";
 import { cors } from "hono/cors";
@@ -21,7 +24,17 @@ import usersRouter from "./routes/users";
 import documentsRouter from "./routes/documents";
 import { logger } from "./lib/logger";
 
+initSentry();
+
 const app = new Hono();
+
+// ✅ Middleware: attach request context
+app.use("*", async (c, next) => {
+  Sentry.withScope((scope) => {
+    scope.setTag("route", c.req.path);
+  });
+  await next();
+});
 
 app.use("*", honoLogger());
 app.use("*", cors({
@@ -58,6 +71,7 @@ app.notFound((c) =>
 );
 
 app.onError((err, c) => {
+  Sentry.captureException(err);
   logger.error({ err }, "Unhandled error");
   return c.json({ error: { code: "INTERNAL_ERROR", message: "Internal server error" } }, 500);
 });

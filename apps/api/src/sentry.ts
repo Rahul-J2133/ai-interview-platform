@@ -1,3 +1,4 @@
+import "./lib/env.js"; // ← FIRST — loads .env before anything else
 import * as Sentry from "@sentry/node";
 
 export function initSentry() {
