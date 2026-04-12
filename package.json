@@ -25,5 +25,9 @@
   "engines": {
     "node": ">=20.0.0"
   },
-  "packageManager": "npm@11.8.0"
+  "packageManager": "npm@11.8.0",
+  "dependencies": {
+    "@sentry/node": "^10.48.0",
+    "@sentry/profiling-node": "^10.48.0"
+  }
 }
