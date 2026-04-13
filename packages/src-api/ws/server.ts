@@ -469,41 +469,6 @@ export function createWebSocketServer(server: Server): WebSocketServer {
         );
       }
 
-      // Flush the pre-generated opening question, if available.
-      // This is consumed once — subsequent reconnects will not re-send it
-      // (the transcript already contains it; the client is responsible for
-      // fetching missed messages via GET /sessions/:id/transcript on reconnect).
-      const openingMsg = InterviewSessionController.consumeOpeningMessage(sessionId);
-      if (openingMsg) {
-        logger.info(
-          {
-            event:     "ws.connection.opening_message_flush",
-            sessionId,
-            length:    openingMsg.length,
-            preview:   openingMsg.slice(0, 80),
-          },
-          "Flushing pre-generated opening question to client"
-        );
-        sendWs(aws, "interviewer_message", sessionId, {
-          content: openingMsg,
-          isNudge: false,
-          stateUpdate: rawSnapshot
-            ? {
-                phase:      (rawSnapshot as unknown as SessionSnapshotShape).context.phase ?? 0,
-                stateName:  typeof (rawSnapshot as unknown as SessionSnapshotShape).value === "string"
-                              ? (rawSnapshot as unknown as SessionSnapshotShape).value
-                              : "ACTIVE",
-                isComplete: false,
-              }
-            : undefined,
-        });
-      } else {
-        logger.debug(
-          { event: "ws.connection.no_opening_message", sessionId },
-          "No pending opening message — candidate must speak first (pre-session generation may have failed)"
-        );
-      }
-
       aws.on("message", (raw) => {
         handleMessage(aws, raw).catch((err: unknown) => {
           // Fix #2: pass err directly — not String(err)

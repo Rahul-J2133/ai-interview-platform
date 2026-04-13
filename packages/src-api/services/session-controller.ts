@@ -209,20 +209,6 @@ const actorRegistry      = new Map<string, AnyActor>();
 const transcriptRegistry = new Map<string, TranscriptEntry[]>();
 const typeRegistry       = new Map<string, InterviewType>();
 
-/**
- * Stores the interviewer's opening question for a session.
- *
- * The opening question is generated at the end of runPreSession — before
- * any WS connection exists — so it cannot be streamed immediately. The WS
- * server reads and clears this map the moment the first connection is
- * established, replaying the message to the client as a normal
- * interviewer_message frame.
- *
- * This is the production-correct model: in a real interview the interviewer
- * always speaks first, without waiting for the candidate to prompt them.
- */
-const openingMessageRegistry = new Map<string, string>();
-
 // ============================================================
 // MODULE-LEVEL HELPERS
 // (defined here so sendAndSettle can use snapToStateName before the class)
@@ -578,106 +564,8 @@ export class InterviewSessionController {
         }
       }
 
-      // ── Generate opening question ────────────────────────────
-      //
-      // The interviewer always speaks first. We generate the opening question
-      // here, during pre-session, so it is ready to be flushed the instant the
-      // candidate's WS connection is established — without any round-trip delay.
-      //
-      // This is architecturally correct for a production interview platform:
-      //   1. runPreSession drives the machine to its first live state
-      //   2. We generate + persist the opening message as seq=0
-      //   3. The 201 response is returned to the client
-      //   4. The client connects via WS; the server flushes the stored message
-      //
-      // The candidate never has to send a blank "start" message.
-      const finalStateName = snapToStateName(actor.getSnapshot() as AnyMachineSnapshot);
-
-      try {
-        const openingSnap  = actor.getSnapshot() as AnyMachineSnapshot;
-        const openingCtx   = openingSnap.context as unknown as AnyContext;
-        const planContext  = InterviewSessionController.buildPlanContext(openingCtx);
-
-        logger.info(
-          {
-            event:        "presession.opening.generating",
-            sessionId:    input.sessionId,
-            state:        finalStateName,
-            phase:        openingCtx.phase,
-            planContext:  planContext.slice(0, 120),
-          },
-          "Generating opening interviewer question"
-        );
-
-        const openingStartMs = Date.now();
-
-        const openingQuestion = await generateInterviewerResponse({
-          interviewType:     input.type,
-          role:              input.role,
-          level:             input.level,
-          currentPhase:      openingCtx.phase,
-          currentState:      finalStateName,
-          transcript:        [],  // empty — this is the very first turn
-          planContext,
-          activeProbeIndex:  0,
-          followUpIntensity: "medium",
-        });
-
-        logger.info(
-          {
-            event:       "presession.opening.generated",
-            sessionId:   input.sessionId,
-            durationMs:  Date.now() - openingStartMs,
-            length:      openingQuestion.length,
-            preview:     openingQuestion.slice(0, 120),
-          },
-          `Opening question generated in ${Date.now() - openingStartMs}ms`
-        );
-
-        // Persist as seq=0 in the transcript table so the transcript is
-        // complete even if the candidate never connects.
-        const transcript = transcriptRegistry.get(input.sessionId) ?? [];
-        transcript.push({
-          role:      "interviewer",
-          content:   openingQuestion,
-          phase:     openingCtx.phase,
-          stateName: finalStateName,
-        });
-        transcriptRegistry.set(input.sessionId, transcript);
-
-        await InterviewSessionController.persistMsg(input.sessionId, {
-          sequenceIndex: 0,
-          role:          "interviewer",
-          type:          "question",
-          content:       openingQuestion,
-          phase:         openingCtx.phase,
-          stateName:     finalStateName,
-          metadata:      { openingQuestion: true },
-        });
-
-        // Store for WS flush on first connection.
-        openingMessageRegistry.set(input.sessionId, openingQuestion);
-
-        logger.debug(
-          { event: "presession.opening.stored", sessionId: input.sessionId },
-          "Opening question stored — will be flushed on first WS connection"
-        );
-
-      } catch (openingErr) {
-        // Opening question generation is non-fatal. The session is still usable:
-        // the first candidate message will trigger a normal AI response.
-        // Log as warn (not error) so alerting thresholds are not breached.
-        logger.warn(
-          {
-            event:     "presession.opening.failed",
-            err:       openingErr,
-            sessionId: input.sessionId,
-          },
-          "Failed to generate opening question — session still usable, candidate must speak first"
-        );
-      }
-
       // ── Write ready status to DB ────────────────────────────
+      const finalStateName = snapToStateName(actor.getSnapshot() as AnyMachineSnapshot);
       logger.debug(
         {
           event:        "presession.db.status_ready",
@@ -811,9 +699,7 @@ export class InterviewSessionController {
       }
 
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
-      // const restoredActor = createActor(machine, { snapshot: row.stateMachineSnapshot as any }) as unknown as AnyActor;
-      const restoredActor = createActor(machine, { snapshot: row.stateMachineSnapshot, input: undefined } as any)
-;
+      const restoredActor = createActor(machine, { snapshot: row.stateMachineSnapshot as any }) as unknown as AnyActor;
       restoredActor.start();
       actorRegistry.set(sessionId, restoredActor);
       transcriptRegistry.set(sessionId, []);
@@ -2733,31 +2619,7 @@ export class InterviewSessionController {
     return "question";
   }
 
-  /**
-   * Returns the pre-generated opening question for a session, then removes
-   * it from the registry so it is only delivered once (on first WS connect).
-   * Returns null if no opening message is pending (already consumed, or
-   * generation failed during pre-session).
-   */
-  static consumeOpeningMessage(sessionId: string): string | null {
-    const msg = openingMessageRegistry.get(sessionId) ?? null;
-    if (msg !== null) {
-      openingMessageRegistry.delete(sessionId);
-      logger.debug(
-        { event: "opening_message.consumed", sessionId },
-        "Opening message consumed from registry"
-      );
-    }
-    return msg;
-  }
-
-  // buildPlanContext is called from runPreSession (opening question generation)
-  // and must therefore be accessible before handleCandidateResponse runs.
-  // It was already static; keep it accessible as-is (the private modifier is
-  // removed below so ws/server.ts can call consumeOpeningMessage cleanly —
-  // buildPlanContext stays private, only consumeOpeningMessage is public).
-
-  static async persistMsg(
+  private static async persistMsg(
     sessionId: string,
     msg: {
       sequenceIndex: number;
