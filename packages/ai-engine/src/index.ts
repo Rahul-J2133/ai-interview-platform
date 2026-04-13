@@ -1,5 +1,6 @@
 /**
- * ai-engine/src/index.ts
+
+ * packages/ai-engine/src/index.ts
  *
  * All AI calls go through this module.
  * - Groq replaces Anthropic entirely.
@@ -92,6 +93,44 @@ async function callAI(
   const text = response.choices[0]?.message?.content;
   if (!text) throw new Error("Groq returned empty response");
   return text;
+}
+
+/**
+ * callAIWithRetry — wraps callAI with exponential backoff.
+ *
+ * Groq rate-limits (429) and transient 5xx errors should not fail an
+ * interview. Three retries with 500ms / 1s / 2s backoff cover the
+ * vast majority of transient failures without adding noticeable latency
+ * on the happy path.
+ *
+ * Errors that should NOT be retried (e.g. invalid request, auth failure)
+ * are re-thrown immediately on the first attempt since they won't recover.
+ */
+async function callAIWithRetry(
+  role: ModelRole,
+  systemPrompt: string,
+  messages: ChatMessage[],
+  maxTokens = 2048,
+  maxRetries = 3
+): Promise<string> {
+  let lastErr: unknown;
+  for (let attempt = 0; attempt < maxRetries; attempt++) {
+    try {
+      return await callAI(role, systemPrompt, messages, maxTokens);
+    } catch (err: unknown) {
+      lastErr = err;
+      // Don't retry on client-side errors (4xx other than 429)
+      const status = (err as { status?: number }).status;
+      if (status !== undefined && status >= 400 && status < 500 && status !== 429) {
+        throw err;
+      }
+      if (attempt < maxRetries - 1) {
+        const delayMs = 500 * Math.pow(2, attempt); // 500ms, 1s, 2s
+        await new Promise((resolve) => setTimeout(resolve, delayMs));
+      }
+    }
+  }
+  throw lastErr;
 }
 
 async function callAIStreaming(
@@ -239,7 +278,7 @@ Return this exact JSON structure:
   }]
 }`;
 
-  const text = await callAI("planner", systemPrompt, [
+  const text = await callAIWithRetry("planner", systemPrompt, [
     { role: "user", content: userMessage },
   ]);
 
@@ -279,7 +318,7 @@ Return JSON array of exactly 3 competencies:
   {"competency": "...", "question": "...", "expectedScope": "...", "starLRequired": true, "followUps": ["..."]}
 ]`;
 
-  const text = await callAI("planner", systemPrompt, [
+  const text = await callAIWithRetry("planner", systemPrompt, [
     { role: "user", content: userMessage },
   ]);
 
@@ -329,7 +368,7 @@ Return JSON array of exactly 3 domains:
   }
 ]`;
 
-  const text = await callAI("planner", systemPrompt, [
+  const text = await callAIWithRetry("planner", systemPrompt, [
     { role: "user", content: userMessage },
   ]);
 
@@ -382,9 +421,22 @@ RULES:
   }
 
   if (onChunk) {
-    return callAIStreaming("interviewer", systemPrompt, messages, onChunk);
+    // Streaming cannot be transparently retried once chunks have been sent to
+    // the client. If streaming fails mid-stream, fall back to the non-streaming
+    // path so the client always gets a complete response (via the terminal frame).
+    try {
+      return await callAIStreaming("interviewer", systemPrompt, messages, onChunk);
+    } catch (streamErr: unknown) {
+      const status = (streamErr as { status?: number }).status;
+      // Only retry on transient errors (429, 5xx). Don't swallow auth failures.
+      if (status !== undefined && status >= 400 && status < 500 && status !== 429) {
+        throw streamErr;
+      }
+      // Fall back to non-streaming with retry so the terminal frame still arrives
+      return callAIWithRetry("interviewer", systemPrompt, messages);
+    }
   }
-  return callAI("interviewer", systemPrompt, messages);
+  return callAIWithRetry("interviewer", systemPrompt, messages);
 }
 
 // ============================================================
@@ -442,7 +494,7 @@ Return JSON:
   "flags": []
 }`;
 
-  const text = await callAI("evaluator", systemPrompt, [
+  const text = await callAIWithRetry("evaluator", systemPrompt, [
     { role: "user", content: userMessage },
   ]);
 
@@ -486,7 +538,7 @@ Be strict and evidence-based. RESPOND ONLY WITH VALID JSON.`;
   "overall": 0.0
 }`;
 
-  const text = await callAI("scorer", systemPrompt, [
+  const text = await callAIWithRetry("scorer", systemPrompt, [
     { role: "user", content: userMessage },
   ], 4096);
 
@@ -555,7 +607,7 @@ Return JSON:
   ]
 }`;
 
-  const text = await callAI("scorer", systemPrompt, [
+  const text = await callAIWithRetry("scorer", systemPrompt, [
     { role: "user", content: userMessage },
   ], 4096);
 
@@ -600,7 +652,7 @@ Return ONLY the single word "CLARIFY" or "JUMP".
 CLARIFY = candidate is asking clarifying questions or stating assumptions before designing.
 JUMP = candidate jumped straight into solution without clarifying requirements.`;
 
-  const text = await callAI(
+  const text = await callAIWithRetry(
     "classifier",
     systemPrompt,
     [{ role: "user", content: candidateResponse.slice(0, 500) }],
@@ -630,7 +682,7 @@ List any factual misconceptions in the candidate's answer.
 Return ONLY a JSON array of strings: ["misconception 1", ...] or [] if none.
 Be strict — only flag clear technical errors, not opinions or style choices.`;
 
-  const text = await callAI(
+  const text = await callAIWithRetry(
     "classifier",
     systemPrompt,
     [{ role: "user", content: answer.slice(0, 1000) }],
@@ -693,7 +745,7 @@ RESPOND ONLY WITH VALID JSON.`;
     learning: z.number().min(0).max(1).optional(),
   });
 
-  const text = await callAI(
+  const text = await callAIWithRetry(
     "evaluator",
     systemPrompt,
     [{ role: "user", content: `Competency: ${competency}\nAnswer: ${answer}\n\nReturn: {"situation":0.0,"task":0.0,"action":0.0,"result":0.0}` }],
@@ -737,7 +789,7 @@ Scoring guide:
 0.2 = Refused to engage or became defensive
 0.0 = Ignored the challenge entirely`;
 
-  const text = await callAI(
+  const text = await callAIWithRetry(
     "classifier",
     systemPrompt,
     [{ role: "user", content: `Challenge: ${challenge}\n\nResponse: ${response}` }],

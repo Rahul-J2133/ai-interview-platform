@@ -1,4 +1,6 @@
 /**
+ * packages\doc-parser\src\index.ts
+ * 
  * @interview/doc-parser
  *
  * PDF and DOCX text extraction with vectorless retrieval.

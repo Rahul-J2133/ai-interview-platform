@@ -1,4 +1,6 @@
 /**
+ * apps\api\src\ws\server.ts
+ * 
  * WebSocket server for real-time interview communication.
  *
  * Each active interview session gets one persistent WS connection.
@@ -82,6 +84,14 @@ interface JwksResponse {
 // ============================================================
 
 const sessionToWs = new Map<string, AuthenticatedWs>();
+
+/**
+ * Per-session in-flight guard.
+ * Prevents concurrent candidate_message / silence_event processing on the same
+ * session — a second message arriving while the first AI call + pump is still
+ * running would race the XState actor and corrupt context.
+ */
+const processingSet = new Set<string>();
 
 // ============================================================
 // HELPERS
@@ -570,6 +580,19 @@ async function handleMessage(aws: AuthenticatedWs, raw: import("ws").RawData): P
           return;
         }
 
+        // In-flight guard — reject concurrent messages on the same session.
+        if (processingSet.has(aws.sessionId)) {
+          logger.warn(
+            { event: "ws.candidate_message.busy", sessionId: aws.sessionId },
+            "candidate_message rejected — previous message still processing"
+          );
+          sendWs(aws, "error", aws.sessionId, {
+            code:    "BUSY",
+            message: "Please wait for the interviewer to respond before sending another message.",
+          });
+          return;
+        }
+
         logger.info(
           {
             event:         "ws.candidate_message.start",
@@ -580,159 +603,169 @@ async function handleMessage(aws: AuthenticatedWs, raw: import("ws").RawData): P
           "Processing candidate message"
         );
 
-        // Fix #1: stream the AI response token-by-token using the existing
-        // "interviewer_message" WsMessageType with a payload shape of:
-        //   { streaming: true, chunk: string, done: false }  — mid-stream token
-        //   { streaming: true, content: string, done: true } — terminal frame
-        //
-        // No new WsMessageType values are introduced. The client distinguishes
-        // streaming frames from the traditional single-shot message by the
-        // presence of streaming: true in the payload.
-        //
-        // The controller still returns the full accumulated text in
-        // result.interviewerResponse, so transcript persistence is unchanged.
-        let chunkCount = 0;
-        const onChunk = (chunk: string): void => {
-          chunkCount++;
-          logger.trace(
-            {
-              event:       "ws.interviewer.stream_chunk",
-              sessionId:   aws.sessionId,
-              chunkIndex:  chunkCount,
-              chunkLength: chunk.length,
-            },
-            `Streaming chunk #${chunkCount}`
-          );
-          sendWs(aws, "interviewer_message", aws.sessionId, {
-            streaming: true,
-            chunk,
-            done:      false,
-          });
-        };
+        processingSet.add(aws.sessionId);
+        try {
+          let chunkCount = 0;
+          const onChunk = (chunk: string): void => {
+            chunkCount++;
+            logger.trace(
+              {
+                event:       "ws.interviewer.stream_chunk",
+                sessionId:   aws.sessionId,
+                chunkIndex:  chunkCount,
+                chunkLength: chunk.length,
+              },
+              `Streaming chunk #${chunkCount}`
+            );
+            sendWs(aws, "interviewer_message", aws.sessionId, {
+              streaming: true,
+              chunk,
+              done:      false,
+            });
+          };
 
-        const result = await InterviewSessionController.handleCandidateResponse(
-          aws.sessionId,
-          content,
-          aws.internalUserId,
-          onChunk
-        );
+          const RESPONSE_TIMEOUT_MS = parseInt(process.env.RESPONSE_TIMEOUT_MS ?? "45000", 10);
 
-        logger.info(
-          {
-            event:          "ws.candidate_message.complete",
-            sessionId:      aws.sessionId,
-            newState:       result.stateUpdate.stateName,
-            newPhase:       result.stateUpdate.phase,
-            isComplete:     result.isComplete,
-            chunksSent:     chunkCount,
-            responseLength: result.interviewerResponse.length,
-          },
-          `Candidate message handled — ${chunkCount} chunks streamed`
-        );
+          const result = await Promise.race([
+            InterviewSessionController.handleCandidateResponse(
+              aws.sessionId,
+              content,
+              aws.internalUserId,
+              onChunk
+            ),
+            new Promise<never>((_, reject) =>
+              setTimeout(
+                () => reject(new Error(`AI response timed out after ${RESPONSE_TIMEOUT_MS}ms`)),
+                RESPONSE_TIMEOUT_MS
+              )
+            ),
+          ]);
 
-        // Terminal frame: includes the full text so clients that missed chunks
-        // can reconstruct the complete message. Also sent when streaming is
-        // disabled (chunkCount === 0) so the client always gets the response.
-        if (result.interviewerResponse) {
-          sendWs(aws, "interviewer_message", aws.sessionId, {
-            streaming:   true,
-            content:     result.interviewerResponse,
-            done:        true,
-            stateUpdate: result.stateUpdate,
-          });
-        }
-
-        sendWs(aws, "session_state_update", aws.sessionId, {
-          phase:      result.stateUpdate.phase,
-          stateName:  result.stateUpdate.stateName,
-          isComplete: result.isComplete,
-        });
-
-        if (result.isComplete) {
           logger.info(
-            { event: "ws.session.complete", sessionId: aws.sessionId },
-            "Session complete — notifying client"
+            {
+              event:          "ws.candidate_message.complete",
+              sessionId:      aws.sessionId,
+              newState:       result.stateUpdate.stateName,
+              newPhase:       result.stateUpdate.phase,
+              isComplete:     result.isComplete,
+              chunksSent:     chunkCount,
+              responseLength: result.interviewerResponse.length,
+            },
+            `Candidate message handled — ${chunkCount} chunks streamed`
           );
-          sendWs(aws, "session_complete", aws.sessionId, {
-            message: "Interview complete. Your report is being generated.",
+
+          if (result.interviewerResponse) {
+            sendWs(aws, "interviewer_message", aws.sessionId, {
+              streaming:   true,
+              content:     result.interviewerResponse,
+              done:        true,
+              stateUpdate: result.stateUpdate,
+            });
+          }
+
+          sendWs(aws, "session_state_update", aws.sessionId, {
+            phase:      result.stateUpdate.phase,
+            stateName:  result.stateUpdate.stateName,
+            isComplete: result.isComplete,
           });
+
+          if (result.isComplete) {
+            logger.info(
+              { event: "ws.session.complete", sessionId: aws.sessionId },
+              "Session complete — notifying client"
+            );
+            sendWs(aws, "session_complete", aws.sessionId, {
+              message: "Interview complete. Your report is being generated.",
+            });
+          }
+        } finally {
+          processingSet.delete(aws.sessionId);
         }
         break;
       }
 
       // ── silence_event ────────────────────────────────────────────────────────
-      //
-      // Fix #4: route through handleCandidateResponse with a sentinel string.
-      //
-      // Original behaviour — sent a hardcoded nudge string directly over the
-      // socket and returned, meaning:
-      //   - The actor never received a CANDIDATE_RESPONSE event
-      //   - silenceEvents counter was never incremented
-      //   - No transcript row was written
-      //   - The DB session row was never updated
-      //   - generateInterviewerResponse was never called
-      //
-      // Now the sentinel flows through the normal pipeline. The machine's
-      // current state (likely a NUDGE/SILENCE state) combined with the sentinel
-      // content causes the AI prompt to emit the appropriate nudge response.
-      // classifyMsgType() already returns "nudge" for states containing "nudge"
-      // or "silence", so the transcript MessageType is also correct.
       case "silence_event": {
+        // Apply the same in-flight guard. A silence timer firing while a
+        // candidate message is still processing would corrupt actor state.
+        if (processingSet.has(aws.sessionId)) {
+          logger.warn(
+            { event: "ws.silence_event.busy", sessionId: aws.sessionId },
+            "silence_event skipped — message already processing"
+          );
+          return;
+        }
+
         logger.info(
           { event: "ws.silence_event.start", sessionId: aws.sessionId },
           "Silence event — routing through state machine"
         );
 
-        let silenceChunkCount = 0;
-        const onSilenceChunk = (chunk: string): void => {
-          silenceChunkCount++;
-          sendWs(aws, "interviewer_message", aws.sessionId, {
-            streaming: true,
-            chunk,
-            done:      false,
-            isNudge:   true,
+        processingSet.add(aws.sessionId);
+        try {
+          let silenceChunkCount = 0;
+          const onSilenceChunk = (chunk: string): void => {
+            silenceChunkCount++;
+            sendWs(aws, "interviewer_message", aws.sessionId, {
+              streaming: true,
+              chunk,
+              done:      false,
+              isNudge:   true,
+            });
+          };
+
+          const RESPONSE_TIMEOUT_MS = parseInt(process.env.RESPONSE_TIMEOUT_MS ?? "45000", 10);
+
+          const result = await Promise.race([
+            InterviewSessionController.handleCandidateResponse(
+              aws.sessionId,
+              SILENCE_SENTINEL,
+              aws.internalUserId,
+              onSilenceChunk
+            ),
+            new Promise<never>((_, reject) =>
+              setTimeout(
+                () => reject(new Error(`Silence event timed out after ${RESPONSE_TIMEOUT_MS}ms`)),
+                RESPONSE_TIMEOUT_MS
+              )
+            ),
+          ]);
+
+          logger.info(
+            {
+              event:          "ws.silence_event.complete",
+              sessionId:      aws.sessionId,
+              newState:       result.stateUpdate.stateName,
+              newPhase:       result.stateUpdate.phase,
+              chunksSent:     silenceChunkCount,
+              responseLength: result.interviewerResponse.length,
+            },
+            "Silence event handled"
+          );
+
+          if (result.interviewerResponse) {
+            sendWs(aws, "interviewer_message", aws.sessionId, {
+              streaming:   true,
+              content:     result.interviewerResponse,
+              done:        true,
+              isNudge:     true,
+              stateUpdate: result.stateUpdate,
+            });
+          }
+
+          sendWs(aws, "session_state_update", aws.sessionId, {
+            phase:      result.stateUpdate.phase,
+            stateName:  result.stateUpdate.stateName,
+            isComplete: result.isComplete,
           });
-        };
 
-        const result = await InterviewSessionController.handleCandidateResponse(
-          aws.sessionId,
-          SILENCE_SENTINEL,
-          aws.internalUserId,
-          onSilenceChunk
-        );
-
-        logger.info(
-          {
-            event:          "ws.silence_event.complete",
-            sessionId:      aws.sessionId,
-            newState:       result.stateUpdate.stateName,
-            newPhase:       result.stateUpdate.phase,
-            chunksSent:     silenceChunkCount,
-            responseLength: result.interviewerResponse.length,
-          },
-          "Silence event handled"
-        );
-
-        if (result.interviewerResponse) {
-          sendWs(aws, "interviewer_message", aws.sessionId, {
-            streaming:   true,
-            content:     result.interviewerResponse,
-            done:        true,
-            isNudge:     true,
-            stateUpdate: result.stateUpdate,
-          });
-        }
-
-        sendWs(aws, "session_state_update", aws.sessionId, {
-          phase:      result.stateUpdate.phase,
-          stateName:  result.stateUpdate.stateName,
-          isComplete: result.isComplete,
-        });
-
-        if (result.isComplete) {
-          sendWs(aws, "session_complete", aws.sessionId, {
-            message: "Interview complete. Your report is being generated.",
-          });
+          if (result.isComplete) {
+            sendWs(aws, "session_complete", aws.sessionId, {
+              message: "Interview complete. Your report is being generated.",
+            });
+          }
+        } finally {
+          processingSet.delete(aws.sessionId);
         }
         break;
       }

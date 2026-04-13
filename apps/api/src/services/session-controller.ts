@@ -1,4 +1,7 @@
 /**
+ * 
+ * apps\api\src\services\session-controller.ts
+ * 
  * InterviewSessionController
  *
  * Single class responsible for the full session lifecycle:
@@ -164,6 +167,37 @@ const PRE_SESSION_STATES = new Set([
   "PLAN_READY",
 ]);
 
+// States where the machine genuinely pauses and waits for the next candidate input.
+// When the machine lands here after processing a response, the turn is complete
+// and control returns to the WS layer.
+//
+// Every state NOT in this set (and not terminal) is an intermediate state that
+// must be driven through immediately in the same turn via pumpToRest().
+//
+// system_design (document 8):
+const CANDIDATE_AWAITING_STATES = new Set([
+  // system_design
+  "DELIVERING", "SILENCE_WATCH", "SILENCE_NUDGE_ISSUED",
+  "CLARIFYING", "ESTIMATING", "SCAFFOLDING_CHECK",
+  "HLD_LISTENING", "PROBE_ISSUE", "DATA_LAYER_REDIRECT",
+  "TRADEOFF_CHALLENGE", "FAILURE_MODE_PROBE", "SCALE_STRESS_TEST",
+  "SELF_CRITIQUE_PROMPT", "CANDIDATE_QA",
+  // behavioral
+  "CONTEXT_SETTING", "BASELINE_QUESTION", "DELIVERING_Q1",
+  "RESULT_DEPTH_PROBE_1", "ADVERSITY_QUESTION", "ACCOUNTABILITY_PROBE",
+  "INFLUENCE_QUESTION", "STAKEHOLDER_PROBE",
+  // behavioral — fallback resting state (waits for CANDIDATE_RESPONSE unless
+  // fallbackAlsoFailed guard fires synchronously on entry via always:)
+  "FALLBACK_PROMPT",
+  // domain_knowledge
+  "CONCEPTUAL_QUESTION", "APPLIED_QUESTION", "WAR_STORY_PROBE",
+  "EDGE_CASE_QUESTION", "ADJACENT_DOMAIN_TEST", "D2_FLOWING_CONVO",
+  "STRETCH_FRAMING", "FIRST_PRINCIPLES_TEST", "LEARNING_VELOCITY",
+  "DELIBERATE_CHALLENGE",
+]);
+
+const TERMINAL_STATES = new Set(["TERMINAL_COMPLETED", "ERROR_STATE"]);
+
 // ============================================================
 // IN-MEMORY REGISTRIES
 // sessionId → actor / transcript / interview type
@@ -181,22 +215,33 @@ const typeRegistry       = new Map<string, InterviewType>();
 // ============================================================
 
 /**
- * Yields control back to the microtask queue so XState v5 can finish
- * processing any in-flight transitions before the next event is sent.
+ * Yields to the macrotask queue (one full event-loop tick) so XState v5
+ * can fully commit every in-flight transition before the next event is sent.
  *
- * Root cause of the stuck-at-parsing bug
- * ──────────────────────────────────────
- * XState v5 processes the transition for a send() synchronously, BUT some
- * internal bookkeeping (entry action scheduling, invoked service setup) is
- * deferred to microtasks. Firing multiple sends in the same synchronous tick
- * means later events can hit a state that isn't "stable" yet and be silently
- * dropped — leaving the machine stuck in the current pre-session state.
+ * Why a macrotask instead of a microtask
+ * ───────────────────────────────────────
+ * XState v5 processes the state transition itself synchronously on actor.send(),
+ * but it defers two categories of work to later ticks:
  *
- * Fix: await Promise.resolve() (one microtask checkpoint) between every
- * sequential send. This is the idiomatic XState v5 pattern for imperative
- * event dispatch from outside the machine.
+ *   1. Microtask-deferred: entry action scheduling, context assignment.
+ *      One Promise.resolve() covers this.
+ *
+ *   2. Macrotask-deferred: `after` delayed-transition setup (setTimeout(0)),
+ *      invoked actor (service) initialization.
+ *      States with `after: { [ms]: "TARGET" }` — like CONCEPTUAL_QUESTION,
+ *      APPLIED_QUESTION, ADVERSITY_QUESTION, etc. — schedule their timer via
+ *      setTimeout. Until that setTimeout callback runs, XState considers the
+ *      state "not fully settled" and can silently discard incoming events.
+ *
+ * Using setImmediate (which runs AFTER all pending setTimeout(0) callbacks)
+ * guarantees the machine has fully committed every entry action and timer
+ * setup before the next send() call arrives.
+ *
+ * Performance: setImmediate adds ~0ms real latency in Node.js. The additional
+ * yield is negligible compared to the AI API calls surrounding each send.
  */
-const yieldMicrotask = (): Promise<void> => Promise.resolve();
+const yieldMacrotask = (): Promise<void> =>
+  new Promise((resolve) => setImmediate(resolve));
 
 /** Standalone state-name extractor — mirrors the static method on the class. */
 function snapToStateName(snap: AnyMachineSnapshot): string {
@@ -226,7 +271,7 @@ async function sendAndSettle(
   );
 
   actor.send(event as never);
-  await yieldMicrotask();
+  await yieldMacrotask();
 
   const stateAfter  = snapToStateName(actor.getSnapshot() as AnyMachineSnapshot);
   const transitioned = stateBefore !== stateAfter;
@@ -299,7 +344,10 @@ export class InterviewSessionController {
       "Actor built and registered in memory"
     );
 
-    // Subscribe before start so we capture the very first snapshot emission.
+    // Subscribe for trace logging only. Snapshot persistence is handled by
+    // the explicit db.update in handleCandidateResponse (after pump settles).
+    // Writing on every subscription emission causes a write storm — up to 10
+    // concurrent UPDATEs on the same row per pumpToRest() call.
     actor.subscribe((snap) => {
       const stateName = snapToStateName(snap as AnyMachineSnapshot);
       logger.trace(
@@ -310,20 +358,6 @@ export class InterviewSessionController {
           status:    snap.status,
         },
         `Snapshot received: ${stateName}`
-      );
-      InterviewSessionController.persistSnapshot(
-        input.sessionId,
-        snap as AnyMachineSnapshot
-      ).catch((err: unknown) =>
-        logger.warn(
-          {
-            event:     "db.snapshot.save_failed",
-            err,
-            sessionId: input.sessionId,
-            stateName,
-          },
-          "Snapshot save failed (non-fatal)"
-        )
       );
     });
 
@@ -621,14 +655,64 @@ export class InterviewSessionController {
       "Candidate response received"
     );
 
-    // ── 1. Actor lookup ────────────────────────────────────────
-    const actor = actorRegistry.get(sessionId);
+    // ── 1. Actor lookup — with snapshot recovery ───────────────
+    let actor = actorRegistry.get(sessionId);
     if (!actor) {
-      logger.error(
-        { event: "candidate.response.no_actor", sessionId },
-        "No active actor found in registry for session"
+      logger.warn(
+        { event: "candidate.response.actor_missing", sessionId },
+        "Actor not in memory — attempting DB snapshot recovery"
       );
-      throw new Error(`No active actor for session: ${sessionId}`);
+
+      const row = await db.query.interviewSessions.findFirst({
+        where:   eq(interviewSessions.id, sessionId),
+        columns: { stateMachineSnapshot: true, type: true, status: true },
+      });
+
+      if (!row || !row.stateMachineSnapshot) {
+        logger.error(
+          { event: "candidate.response.no_actor_no_snapshot", sessionId },
+          "No actor and no DB snapshot — session unrecoverable"
+        );
+        throw new Error(
+          `No active actor for session: ${sessionId}. ` +
+          `Session may have ended or the server restarted without a persisted snapshot.`
+        );
+      }
+
+      if (row.status === "completed" || row.status === "abandoned") {
+        throw new Error(`Session ${sessionId} is already ${row.status}`);
+      }
+
+      logger.info(
+        { event: "candidate.response.actor_recovered", sessionId, type: row.type },
+        "Rebuilding actor from DB snapshot"
+      );
+
+      typeRegistry.set(sessionId, row.type as InterviewType);
+
+      let machine: AnyMachine;
+      switch (row.type as InterviewType) {
+        case "system_design":    machine = systemDesignMachine as unknown as AnyMachine; break;
+        case "behavioral":       machine = behavioralMachine as unknown as AnyMachine; break;
+        case "domain_knowledge": machine = domainKnowledgeMachine as unknown as AnyMachine; break;
+        default: throw new Error(`Unknown interview type: ${row.type}`);
+      }
+
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      const restoredActor = createActor(machine, { snapshot: row.stateMachineSnapshot as any }) as unknown as AnyActor;
+      restoredActor.start();
+      actorRegistry.set(sessionId, restoredActor);
+      transcriptRegistry.set(sessionId, []);
+      actor = restoredActor;
+
+      logger.info(
+        {
+          event:          "candidate.response.actor_recovery_complete",
+          sessionId,
+          recoveredState: snapToStateName(restoredActor.getSnapshot() as AnyMachineSnapshot),
+        },
+        "Actor recovery complete"
+      );
     }
 
     const snap      = actor.getSnapshot() as AnyMachineSnapshot;
@@ -698,7 +782,18 @@ export class InterviewSessionController {
       `Candidate message persisted (seq=${seqIndex})`
     );
 
-    // ── 4. State-specific evaluation ───────────────────────────
+    // ── 4. Run eval for the current state, then advance via CANDIDATE_RESPONSE ──
+    //
+    // After CANDIDATE_RESPONSE the machine may land in an intermediate state
+    // (e.g. MISCONCEPTION_DETECT, CONFIDENCE_CALIBRATE) that is NOT a stable
+    // resting point — it needs eval dispatched and possibly further advances
+    // before control should return to the WS layer.
+    //
+    // pumpToRest() drives the machine through all such intermediate states in
+    // one turn until it reaches a CANDIDATE_AWAITING_STATES member or a
+    // terminal state. This replaces the previous single-send architecture that
+    // left the machine stuck in intermediate states between turns.
+
     logger.debug(
       { event: "eval.start", sessionId, stateName },
       `Starting eval for state ${stateName}`
@@ -711,8 +806,88 @@ export class InterviewSessionController {
       `Eval complete for state ${stateName}`
     );
 
-    // ── 5. Advance state machine ───────────────────────────────
+    // ── 5. Send CANDIDATE_RESPONSE, then pump through intermediate states ──────
     await sendAndSettle(actor, { type: "CANDIDATE_RESPONSE", content }, sessionId);
+
+    // Pump: after CANDIDATE_RESPONSE the machine may be in an intermediate state.
+    // Keep running eval + advancing until we reach a resting or terminal state.
+    let pumpIterations = 0;
+    const MAX_PUMP_ITERATIONS = 40; // safety ceiling — no interview has >40 intermediate states
+
+    while (true) {
+      const pumpSnap     = actor.getSnapshot() as AnyMachineSnapshot;
+      const pumpState    = snapToStateName(pumpSnap);
+      const pumpIsTerminal = pumpSnap.status === "done" || TERMINAL_STATES.has(pumpState);
+      const pumpIsResting  = CANDIDATE_AWAITING_STATES.has(pumpState);
+
+      if (pumpIsTerminal || pumpIsResting) {
+        logger.debug(
+          {
+            event:       "pump.stopped",
+            sessionId,
+            pumpState,
+            pumpIterations,
+            reason:      pumpIsTerminal ? "terminal" : "candidate_awaiting",
+          },
+          `Pump stopped at ${pumpState} after ${pumpIterations} iteration(s)`
+        );
+        break;
+      }
+
+      if (pumpIterations >= MAX_PUMP_ITERATIONS) {
+        logger.error(
+          {
+            event:       "pump.max_iterations",
+            sessionId,
+            pumpState,
+            pumpIterations,
+          },
+          `Pump hit MAX_PUMP_ITERATIONS (${MAX_PUMP_ITERATIONS}) at state ${pumpState} — breaking to avoid infinite loop`
+        );
+        break;
+      }
+
+      pumpIterations++;
+      const pumpCtx = pumpSnap.context as unknown as AnyContext;
+
+      logger.debug(
+        {
+          event:          "pump.iteration",
+          sessionId,
+          pumpState,
+          pumpIterations,
+          phase:          pumpCtx.phase,
+        },
+        `Pump iteration ${pumpIterations}: running eval for intermediate state ${pumpState}`
+      );
+
+      // Run eval for this intermediate state (dispatches the event the state needs)
+      await InterviewSessionController.runEval(
+        actor, sessionId, content, pumpCtx, pumpState
+      );
+
+      // After runEval the state may have already advanced (e.g. MISCONCEPTION_DETECT
+      // sends PHASE_COMPLETE → moves to CONFIDENCE_CALIBRATE). Check again.
+      const afterEvalSnap  = actor.getSnapshot() as AnyMachineSnapshot;
+      const afterEvalState = snapToStateName(afterEvalSnap);
+
+      if (afterEvalState === pumpState) {
+        // runEval did not move the machine — state is stuck. This means the state
+        // needs a CANDIDATE_RESPONSE to advance (e.g. WAR_STORY_PROBE after
+        // APPLIED_QUESTION). But we already sent it — this state should be in
+        // CANDIDATE_AWAITING_STATES. Log and break.
+        logger.warn(
+          {
+            event:       "pump.no_progress",
+            sessionId,
+            pumpState,
+            pumpIterations,
+          },
+          `Pump: runEval did not advance state ${pumpState} — breaking. Add to CANDIDATE_AWAITING_STATES if this state awaits candidate input.`
+        );
+        break;
+      }
+    }
 
     const newSnap      = actor.getSnapshot() as AnyMachineSnapshot;
     const newStateName = snapToStateName(newSnap);
@@ -1171,54 +1346,72 @@ export class InterviewSessionController {
       }
 
       if (stateName === "RESPONSE_CLASSIFY") {
-        // Advance the machine immediately so the response path isn't blocked
-        // while coachability scoring runs asynchronously in the background.
+        // Advance to REASONING_DEPTH_EVAL. Coachability scoring happens
+        // synchronously in the COACHABILITY_SCORING handler below — NOT here.
+        // The previous setImmediate pattern sent COACHABILITY_SCORED after the
+        // machine had already moved past COACHABILITY_SCORING, silently dropping it.
         logger.debug(
-          { event: "eval.coachability.advance", sessionId },
-          "RESPONSE_CLASSIFY: advancing phase immediately (coachability runs async)"
+          { event: "eval.response_classify.advance", sessionId },
+          "RESPONSE_CLASSIFY: advancing to REASONING_DEPTH_EVAL"
         );
         await sendAndSettle(actor, { type: "PHASE_COMPLETE" }, sessionId);
-
-        const transcript      = transcriptRegistry.get(sessionId) ?? [];
-        const lastInterviewer = [...transcript].reverse().find((m) => m.role === "interviewer");
-        const challenge       = lastInterviewer?.content ?? "";
-
-        logger.debug(
-          {
-            event:            "eval.coachability.schedule",
-            sessionId,
-            challengeLength:  challenge.length,
-            challengePreview: challenge.slice(0, 80),
-            responseLength:   content.length,
-          },
-          "Scheduling async coachability scoring via setImmediate"
-        );
-
-        setImmediate(() => {
-          scoreCoachability(challenge, content)
-            .then((score) => {
-              logger.info(
-                { event: "eval.coachability.result", sessionId, score },
-                `Coachability score: ${score}`
-              );
-              actor.send({ type: "COACHABILITY_SCORED", score } as never);
-            })
-            .catch((err: unknown) =>
-              logger.warn(
-                { event: "eval.coachability.error", err, sessionId },
-                "Async coachability scoring failed (non-fatal)"
-              )
-            );
-        });
         return;
       }
 
       // ── Domain Knowledge — auto-advance states ───────────────────────────────
-      //
-      // These states are pure internal transitions in the DK machine. They have
-      // no AI work to do — they just need PHASE_COMPLETE to move forward.
-      // Without these sends the machine blocks here indefinitely waiting for an
-      // event the controller previously never sent.
+
+      if (stateName === "COACHABILITY_SCORING") {
+        // P0 FIX: No handler existed. The async setImmediate in RESPONSE_CLASSIFY
+        // sent COACHABILITY_SCORED after the machine had already advanced, where
+        // it was silently dropped. Score synchronously here, in the correct state.
+        const localTranscript = transcriptRegistry.get(sessionId) ?? [];
+        const lastInterviewer = [...localTranscript].reverse().find((m) => m.role === "interviewer");
+        const challenge = lastInterviewer?.content ?? "";
+        logger.debug(
+          { event: "eval.coachability.start", sessionId, challengeLength: challenge.length },
+          "COACHABILITY_SCORING: scoring synchronously"
+        );
+        const startMs = Date.now();
+        const score = await scoreCoachability(challenge, content);
+        logger.info(
+          { event: "eval.coachability.result", sessionId, score, durationMs: Date.now() - startMs },
+          `Coachability score: ${score.toFixed(3)}`
+        );
+        await sendAndSettle(actor, { type: "COACHABILITY_SCORED", score }, sessionId);
+        return;
+      }
+
+      if (stateName === "CROSS_DOMAIN_LINK") {
+        // P0 FIX: After D2_FLOWING_CONVO CANDIDATE_RESPONSE the machine enters
+        // CROSS_DOMAIN_LINK. No handler existed — pump broke immediately, leaving
+        // the interview permanently stuck in DK Phase 4.
+        logger.debug(
+          { event: "eval.cross_domain_link.advance", sessionId },
+          "CROSS_DOMAIN_LINK: advancing to D2_PACING"
+        );
+        await sendAndSettle(actor, { type: "PHASE_COMPLETE" }, sessionId);
+        return;
+      }
+
+      if (stateName === "D2_PACING") {
+        // P0 FIX: Advance back to D2_FLOWING_CONVO for the next D2 question.
+        logger.debug(
+          { event: "eval.d2_pacing.advance", sessionId },
+          "D2_PACING: advancing to D2_FLOWING_CONVO"
+        );
+        await sendAndSettle(actor, { type: "PHASE_COMPLETE" }, sessionId);
+        return;
+      }
+
+      if (stateName === "D2_REDIRECT") {
+        // P0 FIX: issueD2Redirect action already fired on entry. Resume D2.
+        logger.debug(
+          { event: "eval.d2_redirect.advance", sessionId },
+          "D2_REDIRECT: advancing back to D2_FLOWING_CONVO"
+        );
+        await sendAndSettle(actor, { type: "PHASE_COMPLETE" }, sessionId);
+        return;
+      }
 
       if (stateName === "PROD_SIGNAL_DETECT") {
         // After APPLIED_QUESTION CANDIDATE_RESPONSE → PROD_SIGNAL_DETECT.
@@ -1475,10 +1668,10 @@ export class InterviewSessionController {
           stateName: t.stateName,
         }));
         const { scores, overall, hireSignal } = await computeDimensionScores(
-          session.type,
+          session!.type,
           scoringTranscript,
           plan,
-          session.tier
+          session!.tier
         );
         logger.info(
           {
@@ -1525,13 +1718,13 @@ export class InterviewSessionController {
           stateName: t.stateName,
         }));
         const report = await generateReport(
-          session.type,
+          session!.type,
           sessionId,
           dCtx.dimensionScores,
           dCtx.overallScore ?? 0,
           dCtx.hireSignal ?? "no_hire",
           scoringTranscript,
-          session.tier
+          session!.tier
         );
         logger.info(
           {
@@ -1792,7 +1985,7 @@ export class InterviewSessionController {
           role: t.role, content: t.content, phase: t.phase, stateName: t.stateName,
         }));
         const { scores, overall } = await computeDimensionScores(
-          session.type, scoringTranscript, plan as never, session.tier
+          session!.type, scoringTranscript, plan as never, session!.tier
         );
         logger.info(
           { event: "eval.sd.dimension_scoring.result", sessionId, durationMs: Date.now() - startMs, overall },
@@ -1804,10 +1997,20 @@ export class InterviewSessionController {
 
       if (stateName === "HIRE_SIGNAL_CALC" && typeRegistry.get(sessionId) === "system_design") {
         // SD HIRE_SIGNAL_CALC advances on PHASE_COMPLETE (not SCORE_COMPUTED).
-        // calcAndSetHireSignal action fires on this transition.
         logger.debug(
           { event: "eval.sd.hire_signal.advance", sessionId },
           "SD HIRE_SIGNAL_CALC: advancing to REPORT_GENERATED"
+        );
+        await sendAndSettle(actor, { type: "PHASE_COMPLETE" }, sessionId);
+        return;
+      }
+
+      if (stateName === "HIRE_SIGNAL_CALC" && typeRegistry.get(sessionId) === "domain_knowledge") {
+        // P0 FIX: DK HIRE_SIGNAL_CALC was missing entirely.
+        // computeHireSignal action already fired on state entry — just advance.
+        logger.debug(
+          { event: "eval.dk.hire_signal.advance", sessionId },
+          "DK HIRE_SIGNAL_CALC: advancing to REPORT_BUILDING"
         );
         await sendAndSettle(actor, { type: "PHASE_COMPLETE" }, sessionId);
         return;
@@ -1832,10 +2035,10 @@ export class InterviewSessionController {
           role: t.role, content: t.content, phase: t.phase, stateName: t.stateName,
         }));
         const report = await generateReport(
-          session.type, sessionId,
+          session!.type, sessionId,
           sdCtx.dimensionScores, sdCtx.overallScore ?? 0,
           sdCtx.hireSignal ?? "no_hire",
-          scoringTranscript, session.tier
+          scoringTranscript, session!.tier
         );
         logger.info(
           { event: "eval.sd.report.result", sessionId, durationMs: Date.now() - startMs },
@@ -1855,6 +2058,18 @@ export class InterviewSessionController {
       if (stateName === "STRUCTURE_DETECT") {
         logger.debug({ event: "eval.beh.structure_detect.advance", sessionId }, "STRUCTURE_DETECT: auto-advancing to ATTRIBUTION_CHECK");
         await sendAndSettle(actor, { type: "PHASE_COMPLETE" }, sessionId);
+        return;
+      }
+
+      if (stateName === "FALLBACK_PROMPT") {
+        // Resting state — machine waits for CANDIDATE_RESPONSE unless the
+        // always: guard (fallbackAlsoFailed) fires synchronously on entry and
+        // self-transitions to ADVERSITY_SCORING. Either way, pumpToRest stops
+        // here (it's in CANDIDATE_AWAITING_STATES) and we return immediately.
+        logger.debug(
+          { event: "eval.beh.fallback_prompt.passthrough", sessionId },
+          "FALLBACK_PROMPT: resting, waiting for candidate response"
+        );
         return;
       }
 
@@ -1960,11 +2175,11 @@ export class InterviewSessionController {
         // Heuristic adversity score — replace with AI scorer when available.
         const bCtx  = ctx as BehavioralMachineContext;
         const score: import("@interview/shared-types").AdversityScore = {
-          ownershipScore:    bCtx.iWeRatioRaw > 0.5 ? 0.7 : 0.4,
-          recoveryScore:     bCtx.storyExistenceConfirmed ? 0.7 : 0.3,
-          learningScore:     0.5,
-          negLanguageFlag:   false,
-          accountabilityFlag: false,
+          accountability:  bCtx.iWeRatioRaw > 0.5 ? 0.7 : 0.4,
+          recoveryArc:     bCtx.storyExistenceConfirmed ? 0.7 : 0.3,
+          noBlame:         true,
+          learningQuality: 0.5,
+          noHireSignal:    false,
         };
         logger.debug(
           { event: "eval.beh.adversity_scoring.dispatch", sessionId, score },
@@ -1977,10 +2192,10 @@ export class InterviewSessionController {
       if (stateName === "INFLUENCE_SCORING") {
         // Heuristic influence score — replace with AI scorer when available.
         const score: import("@interview/shared-types").InfluenceScore = {
-          scopeLevel:           "team",
-          stakeholderCount:     1,
-          crossFunctionalReach: false,
-          influenceScore:       0.5,
+          scopeLevel:              2,
+          stakeholderSpecificity:  0.5,
+          frictionHandled:         false,
+          businessOutcome:         false,
         };
         logger.debug(
           { event: "eval.beh.influence_scoring.dispatch", sessionId, score },
@@ -2026,7 +2241,7 @@ export class InterviewSessionController {
           role: t.role, content: t.content, phase: t.phase, stateName: t.stateName,
         }));
         const { scores, overall } = await computeDimensionScores(
-          session.type, scoringTranscript, bCtx.competencyPlan, session.tier
+          session!.type, scoringTranscript, bCtx.competencyPlan, session!.tier
         );
         logger.info(
           { event: "eval.beh.hire_signal.result", sessionId, durationMs: Date.now() - startMs, overall },
@@ -2054,10 +2269,10 @@ export class InterviewSessionController {
           role: t.role, content: t.content, phase: t.phase, stateName: t.stateName,
         }));
         const report = await generateReport(
-          session.type, sessionId,
+          session!.type, sessionId,
           bCtx.dimensionScores, bCtx.overallScore ?? 0,
           bCtx.hireSignal ?? "no_hire",
-          scoringTranscript, session.tier
+          scoringTranscript, session!.tier
         );
         logger.info(
           { event: "eval.beh.report.result", sessionId, durationMs: Date.now() - startMs },
@@ -2279,17 +2494,26 @@ export class InterviewSessionController {
       "Updating user interview aggregates"
     );
 
+    // Read current values first so we can compute the running average in
+    // TypeScript. The previous SQL expression divided by (completed_sessions+1)
+    // while also incrementing in the same query, producing a wrong denominator.
+    const existingAgg = await db.query.userInterviewAggregates.findFirst({
+      where:   eq(userInterviewAggregates.userId, userId),
+      columns: { completedSessions: true, avgOverallScore: true },
+    });
+    const prevCompleted = existingAgg?.completedSessions ?? 0;
+    const prevAvg       = existingAgg?.avgOverallScore   ?? 0;
+    const newCompleted  = prevCompleted + 1;
+    const newAvg        = (prevAvg * prevCompleted + result.overall) / newCompleted;
+
     await db
       .update(userInterviewAggregates)
       .set({
         totalSessions:     sql`total_sessions + 1`,
-        completedSessions: sql`completed_sessions + 1`,
-        avgOverallScore:   sql`
-          (COALESCE(avg_overall_score, 0) * completed_sessions + ${result.overall})
-          / (completed_sessions + 1)
-        `,
-        lastSessionAt: new Date(),
-        updatedAt:     new Date(),
+        completedSessions: newCompleted,
+        avgOverallScore:   newAvg,
+        lastSessionAt:     new Date(),
+        updatedAt:         new Date(),
       })
       .where(eq(userInterviewAggregates.userId, userId));
 
@@ -2359,9 +2583,13 @@ export class InterviewSessionController {
   }
 
   private static buildPlanContext(ctx: AnyContext): string {
-    if (ctx.interviewObject?.questions?.[0]) {
-      return `Current question: ${ctx.interviewObject.questions[0].content}`;
+    // System design — use activeProbeIndex, not always questions[0]
+    if (ctx.interviewObject?.questions) {
+      const idx = Math.min(ctx.activeProbeIndex ?? 0, ctx.interviewObject.questions.length - 1);
+      const q = ctx.interviewObject.questions[idx];
+      return q ? `Current question: ${q.content}\nPhase: ${idx + 1} of ${ctx.interviewObject.questions.length}` : "";
     }
+    // Behavioral — use currentCompetencyIndex
     const bCtx = ctx as BehavioralMachineContext;
     if (Array.isArray(bCtx.competencyPlan) && bCtx.competencyPlan.length > 0) {
       const item = bCtx.competencyPlan[bCtx.currentCompetencyIndex];
@@ -2369,10 +2597,14 @@ export class InterviewSessionController {
         ? `Competency: ${item.competency}\nQuestion: ${item.question}\nExpected scope: ${item.expectedScope}`
         : "";
     }
+    // Domain knowledge — use currentDomain index and expose all 3 question types
     const dCtx = ctx as DomainKnowledgeMachineContext;
     if (Array.isArray(dCtx.domainPlan) && dCtx.domainPlan.length > 0) {
-      const item = dCtx.domainPlan[dCtx.currentDomain ?? 0];
-      return item ? `Domain: ${item.domain}` : "";
+      const domainIndex = Math.min(dCtx.currentDomain ?? 0, dCtx.domainPlan.length - 1);
+      const item = dCtx.domainPlan[domainIndex];
+      return item
+        ? `Domain: ${item.domain}\nConceptual Q: ${item.questions.conceptual}\nApplied Q: ${item.questions.applied}\nEdge case Q: ${item.questions.edgeCase}`
+        : "";
     }
     return "";
   }

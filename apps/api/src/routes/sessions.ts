@@ -1,4 +1,6 @@
 /**
+ * apps\api\src\routes\sessions.ts
+ * 
  * Session routes — REST API for interview session management.
  * All handlers use our internal UUID (auth.internalUserId) for every DB query.
  *

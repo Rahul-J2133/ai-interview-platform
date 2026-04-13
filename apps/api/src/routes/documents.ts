@@ -1,4 +1,7 @@
 /**
+ * 
+ * apps\api\src\routes\documents.ts
+ * 
  * Document upload + text extraction route.
  *
  * POST /api/v1/documents/parse

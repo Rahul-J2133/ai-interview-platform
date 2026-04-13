@@ -8,12 +8,13 @@
   ],
   "scripts": {
     "dev": "turbo run dev",
-    "build": "turbo run build",
+    "build": "turbo run build && npm run sentry:sourcemaps",
     "db:generate": "turbo run db:generate",
     "db:migrate": "turbo run db:migrate",
     "db:push": "turbo run db:push",
     "lint": "turbo run lint",
-    "type-check": "turbo run type-check"
+    "type-check": "turbo run type-check",
+    "sentry:sourcemaps": "sentry-cli sourcemaps inject --org rahul-jathvani --project node-hono apps/api/dist && sentry-cli sourcemaps upload --org rahul-jathvani --project node-hono apps/api/dist"
   },
   "devDependencies": {
     "@types/node": "^20.0.0",
@@ -27,6 +28,7 @@
   },
   "packageManager": "npm@11.8.0",
   "dependencies": {
+    "@sentry/cli": "^2.58.5",
     "@sentry/node": "^10.48.0",
     "@sentry/profiling-node": "^10.48.0"
   }
