@@ -1,0 +1,21 @@
+{
+  // packages/ai-engine/tsconfig.json
+  "extends": "../../tsconfig.base.json",
+  "compilerOptions": {
+    "composite": true,
+    "rootDir": "./src",
+    "outDir": "./dist",
+    // "noEmit": true,
+      "declaration": true,
+    "allowImportingTsExtensions": true,
+    "paths": {
+      "@interview/shared-types":   ["../shared-types/src/index.ts"],
+      "@interview/state-machines": ["../state-machines/src/index.ts"]
+    }
+  },
+  "include": ["src"],
+  "references": [
+    { "path": "../shared-types/tsconfig.json" },
+    { "path": "../state-machines/tsconfig.json" }
+  ]
+}

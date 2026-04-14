@@ -1,0 +1,17 @@
+{
+  // packages/shared-types/tsconfig.json
+  "extends": "../../tsconfig.base.json",
+  "compilerOptions": {
+    "composite": true,
+    "rootDir": "./src",
+    "outDir": "./dist",
+    // Pure types package — importing .ts extensions across packages is fine
+    // here because this package never emits JS (noEmit overrides outDir at
+    // the tsc level; composite still writes .d.ts via declarationDir).
+    // "noEmit": true,
+      "declaration": true,
+
+    "allowImportingTsExtensions": true
+  },
+  "include": ["src"]
+}

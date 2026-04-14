@@ -810,10 +810,13 @@ export class InterviewSessionController {
         default: throw new Error(`Unknown interview type: ${row.type}`);
       }
 
+      // XState v5: createActor() requires `input` in its options type even when
+      // restoring from a snapshot. At runtime, XState ignores `input` entirely
+      // when a `snapshot` is provided — the full context is carried by the
+      // snapshot. We satisfy the type checker by casting to `any` on the options
+      // object (not on the actor), which is the narrowest possible suppression.
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
-      // const restoredActor = createActor(machine, { snapshot: row.stateMachineSnapshot as any }) as unknown as AnyActor;
-      const restoredActor = createActor(machine, { snapshot: row.stateMachineSnapshot, input: undefined } as any)
-;
+      const restoredActor = createActor(machine, { snapshot: row.stateMachineSnapshot, input: undefined } as any) as unknown as AnyActor;
       restoredActor.start();
       actorRegistry.set(sessionId, restoredActor);
       transcriptRegistry.set(sessionId, []);
@@ -2657,38 +2660,38 @@ export class InterviewSessionController {
 
   // ─── SNAPSHOT PERSISTENCE ──────────────────────────────────
 
-  private static async persistSnapshot(
-    sessionId: string,
-    snap: AnyMachineSnapshot
-  ): Promise<void> {
-    const ctx       = snap.context as unknown as AnyContext;
-    const stateName = snapToStateName(snap);
+  // private static async persistSnapshot(
+  //   sessionId: string,
+  //   snap: AnyMachineSnapshot
+  // ): Promise<void> {
+  //   const ctx       = snap.context as unknown as AnyContext;
+  //   const stateName = snapToStateName(snap);
 
-    logger.trace(
-      {
-        event:         "db.snapshot.persisting",
-        sessionId,
-        stateName,
-        phase:         ctx.phase,
-        machineStatus: snap.status,
-      },
-      `Persisting snapshot: ${stateName}`
-    );
+  //   logger.trace(
+  //     {
+  //       event:         "db.snapshot.persisting",
+  //       sessionId,
+  //       stateName,
+  //       phase:         ctx.phase,
+  //       machineStatus: snap.status,
+  //     },
+  //     `Persisting snapshot: ${stateName}`
+  //   );
 
-    await db
-      .update(interviewSessions)
-      .set({
-        currentPhase:         ctx.phase,
-        stateMachineSnapshot: snap as unknown as typeof interviewSessions.$inferInsert["stateMachineSnapshot"],
-        updatedAt:            new Date(),
-      })
-      .where(eq(interviewSessions.id, sessionId));
+  //   await db
+  //     .update(interviewSessions)
+  //     .set({
+  //       currentPhase:         ctx.phase,
+  //       stateMachineSnapshot: snap as unknown as typeof interviewSessions.$inferInsert["stateMachineSnapshot"],
+  //       updatedAt:            new Date(),
+  //     })
+  //     .where(eq(interviewSessions.id, sessionId));
 
-    logger.trace(
-      { event: "db.snapshot.persisted", sessionId, stateName, phase: ctx.phase },
-      `Snapshot persisted: ${stateName}`
-    );
-  }
+  //   logger.trace(
+  //     { event: "db.snapshot.persisted", sessionId, stateName, phase: ctx.phase },
+  //     `Snapshot persisted: ${stateName}`
+  //   );
+  // }
 
   // ─── HELPERS ───────────────────────────────────────────────
 
