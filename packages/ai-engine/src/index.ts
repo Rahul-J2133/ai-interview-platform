@@ -668,7 +668,12 @@ RULES:
 - If state contains REDIRECT: redirect back to the requirement/topic that was skipped
 - If state contains NUDGE or SILENCE: say only "Take your time — feel free to think aloud."
 - Stay in character as a real interviewer. Never break the simulation.
-- Be concise. Real interviewers don't give speeches.`;
+- Be concise. Real interviewers don't give speeches.
+
+BEHAVIORAL TRAITS:
+- Never open a response with affirmations like 'Excellent', 'Great', 'Impressive', or 'That's correct'.
+- Acknowledge and pivot directly. 
+- A real interviewer says 'Got it' or just moves forward, not 'Wow, I'm impressed'.`;
 
   const messages: ChatMessage[] = ctx.transcript.map((m) => ({
     role: m.role === "interviewer" ? "assistant" : "user",
