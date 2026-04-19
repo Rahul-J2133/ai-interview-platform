@@ -10,8 +10,6 @@
     // the tsc level; composite still writes .d.ts via declarationDir).
     // "noEmit": true,
       "declaration": true,
-
-    "allowImportingTsExtensions": true
   },
   "include": ["src"]
 }

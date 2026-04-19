@@ -7,8 +7,6 @@
     "outDir": "./dist",
     // "noEmit": true,
       "declaration": true,
-
-    "allowImportingTsExtensions": true,
     "paths": {
       "@interview/shared-types": ["../shared-types/src/index.ts"]
     }

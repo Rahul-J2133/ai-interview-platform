@@ -101,7 +101,7 @@ const destination = pino.destination({
   sync: true,
 });
 
-export const logger = pino(
+const logger = pino(
   {
     level: "debug",
     base: { service: "ai-engine" },
