@@ -17,6 +17,6 @@
     "@interview/shared-types": "*"
   },
   "scripts": {
-  "typecheck": "tsc --noEmit"
+  "type-check": "tsc --noEmit"
 }
 }

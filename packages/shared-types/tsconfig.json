@@ -9,9 +9,7 @@
     // here because this package never emits JS (noEmit overrides outDir at
     // the tsc level; composite still writes .d.ts via declarationDir).
     // "noEmit": true,
-      "declaration": true,
-
-    "allowImportingTsExtensions": true
+      "declaration": true
   },
   "include": ["src"]
 }
