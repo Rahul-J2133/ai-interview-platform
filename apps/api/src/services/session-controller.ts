@@ -1521,19 +1521,43 @@ export class InterviewSessionController {
           { event: "eval.cross_domain_link.advance", sessionId },
           "CROSS_DOMAIN_LINK: advancing to D2_PACING"
         );
+        // Increment so D2_PACING can track how many D2 exchanges have occurred.
+        await sendAndSettle(actor, { type: "CANDIDATE_RESPONSE", content }, sessionId);        
         await sendAndSettle(actor, { type: "PHASE_COMPLETE" }, sessionId);
         return;
       }
 
       if (stateName === "D2_PACING") {
         // P0 FIX: Advance back to D2_FLOWING_CONVO for the next D2 question.
-        logger.debug(
-          { event: "eval.d2_pacing.advance", sessionId },
-          "D2_PACING: advancing to D2_FLOWING_CONVO"
-        );
-        await sendAndSettle(actor, { type: "PHASE_COMPLETE" }, sessionId);
+      //   logger.debug(
+      //     { event: "eval.d2_pacing.advance", sessionId },
+      //     "D2_PACING: advancing to D2_FLOWING_CONVO"
+      //   );
+      //   await sendAndSettle(actor, { type: "PHASE_COMPLETE" }, sessionId);
+      //   return;
+      // }
+        const dCtx = ctx as DomainKnowledgeMachineContext;
+        const D2_EXCHANGE_LIMIT = process.env.NODE_ENV === "production" ? 8 : 2;
+        const shouldExitD2 =
+          dCtx.totalExchanges >= D2_EXCHANGE_LIMIT ||
+          dCtx.d2RedirectIssued;
+        // Important caveat on the CROSS_DOMAIN_LINK increment: totalExchanges is incremented by handleCandidateResponse before runEval is called, so it already reflects the current exchange count by the time D2_PACING checks it. You do not need the extra CANDIDATE_RESPONSE send in CROSS_DOMAIN_LINK — remove that line from the diff. The check in D2_PACING against totalExchanges will work correctly as-is.
+        if (shouldExitD2) {
+          logger.info(
+            { event: "eval.d2_pacing.exit", sessionId, totalExchanges: dCtx.totalExchanges },
+            "D2_PACING: exchange limit reached — exiting to D2_SCORING"
+          );
+          await sendAndSettle(actor, { type: "TIMEOUT" }, sessionId);
+        } else {
+          logger.debug(
+            { event: "eval.d2_pacing.continue", sessionId, totalExchanges: dCtx.totalExchanges },
+            "D2_PACING: continuing — advancing to D2_FLOWING_CONVO"
+          );
+          await sendAndSettle(actor, { type: "PHASE_COMPLETE" }, sessionId);
+        }
+        // Note: CANDIDATE_RESPONSE in CROSS_DOMAIN_LINK is safe — the machine's on: block there only accepts CROSS_DOMAIN_LINKED and PHASE_COMPLETE, so CANDIDATE_RESPONSE is silently ignored by XState. The incrementExchanges action fires via the top-level actor.send side-effect tracked in handleCandidateResponse, not from CROSS_DOMAIN_LINK's transitions. A cleaner alternative is to add a dedicated d2ExchangeCount field to the machine context        
         return;
-      }
+      }      
 
       if (stateName === "D2_REDIRECT") {
         // P0 FIX: issueD2Redirect action already fired on entry. Resume D2.

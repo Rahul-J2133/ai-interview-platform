@@ -76,7 +76,8 @@ export const PHASE_BUDGETS_MS = {
     1: 480_000,
     2: 480_000,
     3: 480_000,
-    4: 720_000,
+    // 4: 720_000,
+    4: 60_000,    // 12-minute timer is too long for a test/dev environment
     5: 600_000,
     6: 300_000,
     7: 180_000,
