@@ -33,13 +33,5 @@
     "db:push": {
       "cache": false
     }
-  },
-  "pipeline": {
-    "typecheck": {
-      "dependsOn": [
-        "^typecheck"
-      ],
-      "outputs": []
-    }
   }
 }

@@ -30,6 +30,7 @@
   "dependencies": {
     "@sentry/cli": "^2.58.5",
     "@sentry/node": "^10.48.0",
-    "@sentry/profiling-node": "^10.48.0"
+    "@sentry/profiling-node": "^10.48.0",
+    "ollama": "^0.6.3"
   }
 }

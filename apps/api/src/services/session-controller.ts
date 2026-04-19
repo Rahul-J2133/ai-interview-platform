@@ -304,6 +304,73 @@ async function sendAndSettle(
   );
 }
 
+import path from "node:path";
+import fs   from "node:fs";
+import pino from "pino";
+import { fileURLToPath } from "node:url";
+
+// ESM-compatible __dirname
+const __dirname = path.dirname(fileURLToPath(import.meta.url));
+
+// ── Resolve <turborepo-root>/logs/ ─────────────────────────────────────────
+// Works regardless of which package/app imports this module.
+function findRepoRoot(start: string): string {
+  let dir = start;
+  while (true) {
+    if (
+      fs.existsSync(path.join(dir, "pnpm-workspace.yaml")) ||
+      fs.existsSync(path.join(dir, "turbo.json"))
+    ) {
+      return dir;
+    }
+    const parent = path.dirname(dir);
+    if (parent === dir) return start; // reached filesystem root — fallback
+    dir = parent;
+  }
+}
+
+const REPO_ROOT = findRepoRoot(__dirname);const LOGS_DIR  = path.join(REPO_ROOT, "logs");
+fs.mkdirSync(LOGS_DIR, { recursive: true }); // ensure folder exists
+
+const LOG_FILE  = path.join(LOGS_DIR, "state-machine.log");
+
+// ── Pino transport: file + pretty console (dev only) ──────────────────────
+const isDev = process.env.NODE_ENV !== "production";
+
+const transport = pino.transport({
+  targets: [
+    // Always write structured JSON to the log file
+    {
+      target : "pino/file",
+      level  : "trace",
+      options: { destination: LOG_FILE, append: true, mkdir: true },
+    },
+    // Pretty-print to stdout in development
+    ...(isDev
+      ? [{
+          target : "pino-pretty",
+          level  : "trace",
+          options: {
+            colorize       : true,
+            translateTime  : "SYS:HH:MM:ss.l",
+            ignore         : "pid,hostname",
+            messageFormat  : "{msg}  [{stateName}]  status={status}",
+          },
+        }]
+      : []),
+  ],
+});
+
+const smLogger = pino(
+  {
+    level       : "trace",
+    base        : { service: "state-machine" },
+    timestamp   : pino.stdTimeFunctions.isoTime,
+  },
+  transport,
+);
+
+
 // ============================================================
 // SESSION CONTROLLER
 // ============================================================
@@ -364,12 +431,27 @@ export class InterviewSessionController {
     // concurrent UPDATEs on the same row per pumpToRest() call.
     actor.subscribe((snap) => {
       const stateName = snapToStateName(snap as AnyMachineSnapshot);
+    
+      // ── existing trace log (unchanged) ──────────────────────────────────────
       logger.trace(
         {
-          event:     "xstate.snapshot.received",
+          event    : "xstate.snapshot.received",
           sessionId: input.sessionId,
           stateName,
-          status:    snap.status,
+          status   : snap.status,
+        },
+        `Snapshot received: ${stateName}`
+      );
+    
+      // ── NEW: persist to logs/state-machine.log ───────────────────────────────
+      smLogger.trace(
+        {
+          event    : "xstate.snapshot.received",
+          sessionId: input.sessionId,
+          stateName,
+          status   : snap.status,
+          // include context snapshot for full observability
+          context  : (snap as AnyMachineSnapshot).context,
         },
         `Snapshot received: ${stateName}`
       );

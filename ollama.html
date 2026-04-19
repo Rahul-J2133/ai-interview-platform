@@ -1,0 +1,512 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>DeepSeek Chat</title>
+  <style>
+    @import url('https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500;700&family=Syne:wght@400;600;800&display=swap');
+
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+    :root {
+      --bg: #0a0a0f;
+      --surface: #111118;
+      --border: #1e1e2e;
+      --accent: #7c6aff;
+      --accent-dim: rgba(124,106,255,0.12);
+      --think: #f59e0b;
+      --think-dim: rgba(245,158,11,0.08);
+      --text: #e2e2f0;
+      --muted: #6b6b8a;
+      --mono: 'JetBrains Mono', monospace;
+      --sans: 'Syne', sans-serif;
+    }
+
+    body {
+      background: var(--bg);
+      color: var(--text);
+      font-family: var(--mono);
+      height: 100vh;
+      display: grid;
+      grid-template-rows: auto 1fr auto;
+      overflow: hidden;
+    }
+
+    header {
+      padding: 16px 24px;
+      border-bottom: 1px solid var(--border);
+      display: flex;
+      align-items: center;
+      gap: 12px;
+    }
+    header h1 {
+      font-family: var(--sans);
+      font-weight: 800;
+      font-size: 18px;
+      letter-spacing: -0.02em;
+    }
+    .status-dot {
+      width: 8px; height: 8px;
+      border-radius: 50%;
+      background: #22c55e;
+      box-shadow: 0 0 6px #22c55e;
+      transition: background 0.3s, box-shadow 0.3s;
+    }
+    .status-dot.offline { background: #ef4444; box-shadow: 0 0 6px #ef4444; }
+    .status-dot.loading { background: var(--accent); box-shadow: 0 0 6px var(--accent); animation: pulse 1s infinite; }
+    @keyframes pulse { 0%,100% { opacity: 1; } 50% { opacity: 0.3; } }
+
+    #messages {
+      overflow-y: auto;
+      padding: 24px;
+      display: flex;
+      flex-direction: column;
+      gap: 20px;
+    }
+    #messages::-webkit-scrollbar { width: 4px; }
+    #messages::-webkit-scrollbar-track { background: transparent; }
+    #messages::-webkit-scrollbar-thumb { background: var(--border); border-radius: 2px; }
+
+    .msg { display: flex; flex-direction: column; gap: 8px; animation: fadeUp 0.2s ease; }
+    @keyframes fadeUp { from { opacity:0; transform: translateY(6px); } to { opacity:1; transform: none; } }
+
+    .msg-user { align-items: flex-end; }
+    .msg-user .bubble {
+      background: var(--accent-dim);
+      border: 1px solid rgba(124,106,255,0.25);
+      color: var(--text);
+      padding: 10px 14px;
+      border-radius: 12px 12px 2px 12px;
+      max-width: 70%;
+      font-size: 13px;
+      line-height: 1.6;
+    }
+
+    .msg-assistant { align-items: flex-start; }
+
+    .think-block {
+      background: var(--think-dim);
+      border: 1px solid rgba(245,158,11,0.2);
+      border-radius: 8px;
+      overflow: hidden;
+      max-width: 100%;
+    }
+    .think-header {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      padding: 8px 12px;
+      cursor: pointer;
+      user-select: none;
+      border-bottom: 1px solid rgba(245,158,11,0.15);
+    }
+    .think-header:hover { background: rgba(245,158,11,0.05); }
+    .think-label {
+      font-size: 11px;
+      font-weight: 700;
+      color: var(--think);
+      text-transform: uppercase;
+      letter-spacing: 0.08em;
+      flex: 1;
+    }
+    .think-toggle { font-size: 10px; color: var(--muted); }
+    .think-content {
+      padding: 12px;
+      font-size: 12px;
+      line-height: 1.7;
+      color: #c9a56a;
+      white-space: pre-wrap;
+      max-height: 300px;
+      overflow-y: auto;
+    }
+    .think-content.collapsed { display: none; }
+
+    .response-bubble {
+      background: var(--surface);
+      border: 1px solid var(--border);
+      padding: 12px 14px;
+      border-radius: 2px 12px 12px 12px;
+      max-width: 85%;
+      font-size: 13px;
+      line-height: 1.75;
+      white-space: pre-wrap;
+    }
+
+    .cursor {
+      display: inline-block;
+      width: 2px; height: 14px;
+      background: var(--accent);
+      margin-left: 2px;
+      vertical-align: middle;
+      animation: blink 0.8s steps(1) infinite;
+    }
+    @keyframes blink { 0%,100%{ opacity:1; } 50%{ opacity:0; } }
+
+    .error-msg {
+      font-size: 12px;
+      color: #f87171;
+      border: 1px solid rgba(248,113,113,0.2);
+      background: rgba(248,113,113,0.05);
+      border-radius: 8px;
+      padding: 8px 12px;
+    }
+
+    footer {
+      padding: 16px 24px;
+      border-top: 1px solid var(--border);
+      display: flex;
+      gap: 10px;
+    }
+
+    #input {
+      flex: 1;
+      background: var(--surface);
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      padding: 10px 14px;
+      color: var(--text);
+      font-family: var(--mono);
+      font-size: 13px;
+      outline: none;
+      resize: none;
+      line-height: 1.5;
+      max-height: 120px;
+      transition: border-color 0.2s;
+    }
+    #input:focus { border-color: rgba(124,106,255,0.5); }
+    #input::placeholder { color: var(--muted); }
+
+    #send {
+      background: var(--accent);
+      border: none;
+      border-radius: 8px;
+      padding: 0 18px;
+      color: #fff;
+      font-family: var(--sans);
+      font-size: 13px;
+      font-weight: 600;
+      cursor: pointer;
+      transition: opacity 0.2s;
+      align-self: flex-end;
+      height: 40px;
+      white-space: nowrap;
+    }
+    #send:hover { opacity: 0.85; }
+    #send:disabled { opacity: 0.35; cursor: not-allowed; }
+
+    .empty-state {
+      flex: 1;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      justify-content: center;
+      color: var(--muted);
+      gap: 8px;
+      font-size: 13px;
+    }
+    .empty-state span { font-size: 32px; }
+  </style>
+</head>
+<body>
+  <header>
+    <div class="status-dot" id="dot"></div>
+    <h1>DeepSeek ⟡ Ollama</h1>
+    <div style="margin-left:auto;font-size:11px;color:var(--muted)" id="model-label">deepseek-r1</div>
+  </header>
+
+  <div id="messages">
+    <div class="empty-state" id="empty">
+      <span>🧠</span>
+      <div>Ask anything — chain-of-thought shown separately</div>
+    </div>
+  </div>
+
+  <footer>
+    <textarea id="input" rows="1" placeholder="Send a message…"></textarea>
+    <button id="send">Send</button>
+  </footer>
+
+  <script type="module">
+    // ── config ────────────────────────────────────────────────────────────────
+    const OLLAMA_URL = 'http://localhost:11434';
+    const MODEL      = 'deepseek-r1'; // change to deepseek-r1:8b, :14b, etc.
+
+    // ── DOM ───────────────────────────────────────────────────────────────────
+    const messagesEl = document.getElementById('messages');
+    const inputEl    = document.getElementById('input');
+    const sendBtn    = document.getElementById('send');
+    const dot        = document.getElementById('dot');
+    const emptyEl    = document.getElementById('empty');
+
+    // ── state ─────────────────────────────────────────────────────────────────
+    /** @type {{ role: 'user'|'assistant', content: string }[]} */
+    const history = [];
+    let streaming = false;
+
+    // ── helpers ───────────────────────────────────────────────────────────────
+
+    function setStatus(s) { dot.className = 'status-dot' + (s ? ' ' + s : ''); }
+    function scrollBottom() { messagesEl.scrollTop = messagesEl.scrollHeight; }
+    function escHtml(s) {
+      return s.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
+    }
+
+    // ── render user bubble ────────────────────────────────────────────────────
+    function appendUser(text) {
+      emptyEl?.remove();
+      const wrap = document.createElement('div');
+      wrap.className = 'msg msg-user';
+      wrap.innerHTML = `<div class="bubble">${escHtml(text)}</div>`;
+      messagesEl.appendChild(wrap);
+      scrollBottom();
+    }
+
+    // ── render assistant frame (returns live updaters) ────────────────────────
+    function appendAssistant() {
+      const id = 'tc-' + Date.now();
+      const wrap = document.createElement('div');
+      wrap.className = 'msg msg-assistant';
+
+      const thinkBlock = document.createElement('div');
+      thinkBlock.className = 'think-block';
+      thinkBlock.style.display = 'none';
+      thinkBlock.innerHTML = `
+        <div class="think-header">
+          <span class="think-label">⚙ Chain of Thought</span>
+          <span class="think-toggle">▾ collapse</span>
+        </div>
+        <div class="think-content" id="${id}"></div>`;
+      thinkBlock.querySelector('.think-header').addEventListener('click', () => {
+        const tc = thinkBlock.querySelector('.think-content');
+        const tog = thinkBlock.querySelector('.think-toggle');
+        tc.classList.toggle('collapsed');
+        tog.textContent = tc.classList.contains('collapsed') ? '▸ expand' : '▾ collapse';
+      });
+
+      const resp = document.createElement('div');
+      resp.className = 'response-bubble';
+      resp.innerHTML = '<span class="cursor"></span>';
+
+      wrap.appendChild(thinkBlock);
+      wrap.appendChild(resp);
+      messagesEl.appendChild(wrap);
+      scrollBottom();
+
+      const thinkContent = document.getElementById(id);
+
+      return {
+        appendThinking(text) {
+          if (!text) return;
+          thinkBlock.style.display = 'block';
+          thinkContent.textContent += text;
+          scrollBottom();
+        },
+        setThinking(text) {
+          if (!text) return;
+          thinkBlock.style.display = 'block';
+          thinkContent.textContent = text;
+          scrollBottom();
+        },
+        appendResponse(text, done) {
+          // remove cursor first
+          const cur = resp.querySelector('.cursor');
+          if (cur) cur.remove();
+          resp.textContent += text; // textContent safe — no XSS
+          if (!done) resp.appendChild(Object.assign(document.createElement('span'), { className: 'cursor' }));
+          scrollBottom();
+        },
+        setResponse(text, done) {
+          resp.textContent = text;
+          if (!done) resp.appendChild(Object.assign(document.createElement('span'), { className: 'cursor' }));
+          scrollBottom();
+        },
+        showError(msg) {
+          resp.innerHTML = `<span class="error-msg">⚠ ${escHtml(msg)}</span>`;
+        }
+      };
+    }
+
+    // ── stream parser state machine ───────────────────────────────────────────
+    // Handles three Ollama/DeepSeek-R1 formats:
+    //   A) chunk.message.thinking  (newer Ollama builds expose thinking field separately)
+    //   B) chunk.message.content with <think>…</think> tags inline
+    //   C) no thinking at all (model variant without CoT)
+    function makeParser() {
+      // For format B: track where we are in the tag
+      let state = 'before'; // 'before' | 'inside' | 'after'
+      let tagBuf = '';       // accumulates partial tag chars like '<thi'
+
+      return {
+        /**
+         * Feed one raw content token. Returns { thinking, response } strings
+         * (either may be empty) to append to UI.
+         */
+        feed(token) {
+          if (!token) return { thinking: '', response: '' };
+
+          // Format A: Ollama separates thinking — handled outside, not here.
+          // Format B: parse <think>…</think> from the content stream.
+          let thinking = '';
+          let response = '';
+
+          for (let i = 0; i < token.length; i++) {
+            const ch = token[i];
+
+            if (state === 'before') {
+              tagBuf += ch;
+              // Waiting to see if stream opens with <think>
+              if ('<think>'.startsWith(tagBuf)) {
+                if (tagBuf === '<think>') { state = 'inside'; tagBuf = ''; }
+                // else keep buffering
+              } else {
+                // Not a think tag — flush buffer as response
+                response += tagBuf;
+                tagBuf = '';
+                state = 'after';
+              }
+            } else if (state === 'inside') {
+              // Inside thinking block, watch for </think>
+              tagBuf += ch;
+              if ('</think>'.startsWith(tagBuf)) {
+                if (tagBuf === '</think>') { state = 'after'; tagBuf = ''; }
+                // else keep buffering the close tag
+              } else {
+                // Not a close tag — these chars are thinking content
+                thinking += tagBuf;
+                tagBuf = '';
+              }
+            } else {
+              // state === 'after': everything is response
+              response += ch;
+            }
+          }
+
+          return { thinking, response };
+        }
+      };
+    }
+
+    // ── core: stream from Ollama ──────────────────────────────────────────────
+    async function streamChat(userText) {
+      history.push({ role: 'user', content: userText });
+
+      const ui = appendAssistant();
+      setStatus('loading');
+
+      // Accumulate for history
+      let fullThinking = '';
+      let fullResponse = '';
+
+      const parser = makeParser();
+
+      try {
+        const res = await fetch(`${OLLAMA_URL}/api/chat`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            model: MODEL,
+            messages: history,
+            stream: true,
+          }),
+        });
+
+        if (!res.ok) throw new Error(`Ollama error ${res.status}: ${await res.text()}`);
+
+        const reader = res.body.getReader();
+        const decoder = new TextDecoder();
+
+        while (true) {
+          const { done, value } = await reader.read();
+          if (done) break;
+
+          const lines = decoder.decode(value, { stream: true }).split('\n').filter(Boolean);
+
+          for (const line of lines) {
+            let chunk;
+            try { chunk = JSON.parse(line); } catch { continue; }
+
+            // ── Format A: dedicated thinking field ──────────────────────────
+            const thinkToken = chunk?.message?.thinking ?? '';
+            if (thinkToken) {
+              fullThinking += thinkToken;
+              ui.appendThinking(thinkToken);
+            }
+
+            // ── Format B/C: content field (may contain <think> tags or not) ─
+            const contentToken = chunk?.message?.content ?? '';
+            if (contentToken) {
+              const { thinking, response } = parser.feed(contentToken);
+              if (thinking) { fullThinking += thinking; ui.appendThinking(thinking); }
+              if (response) { fullResponse += response; ui.appendResponse(response, false); }
+            }
+
+            if (chunk.done) {
+              // Remove trailing cursor
+              ui.appendResponse('', true);
+              break;
+            }
+          }
+        }
+
+        // Store clean response (no <think> tags) in history
+        history.push({ role: 'assistant', content: fullResponse || fullThinking });
+        setStatus('');
+
+      } catch (err) {
+        ui.showError(err.message);
+        history.pop();
+        setStatus('offline');
+        console.error('[DeepSeek stream error]', err);
+      }
+    }
+
+    // ── send ──────────────────────────────────────────────────────────────────
+    async function send() {
+      const text = inputEl.value.trim();
+      if (!text || streaming) return;
+
+      streaming = true;
+      sendBtn.disabled = true;
+      inputEl.value = '';
+      inputEl.style.height = 'auto';
+
+      appendUser(text);
+      await streamChat(text);
+
+      streaming = false;
+      sendBtn.disabled = false;
+      inputEl.focus();
+    }
+
+    sendBtn.addEventListener('click', send);
+    inputEl.addEventListener('keydown', e => {
+      if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); send(); }
+    });
+    inputEl.addEventListener('input', () => {
+      inputEl.style.height = 'auto';
+      inputEl.style.height = Math.min(inputEl.scrollHeight, 120) + 'px';
+    });
+
+    // ── ping Ollama on load ───────────────────────────────────────────────────
+    (async () => {
+      try {
+        const r = await fetch(`${OLLAMA_URL}/api/tags`);
+        const data = await r.json();
+        const models = data.models?.map(m => m.name) ?? [];
+        const found  = models.find(m => m.startsWith('deepseek-r1'));
+        if (found) {
+          document.getElementById('model-label').textContent = found;
+          setStatus('');
+        } else {
+          setStatus('offline');
+          document.getElementById('model-label').textContent = 'model not found';
+        }
+      } catch {
+        setStatus('offline');
+        document.getElementById('model-label').textContent = 'ollama offline';
+      }
+    })();
+  </script>
+</body>
+</html>

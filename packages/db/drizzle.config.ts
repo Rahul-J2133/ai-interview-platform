@@ -4,7 +4,8 @@ import type { Config } from "drizzle-kit";
 
 // Load env when drizzle-kit runs from the packages/db directory
 // or from apps/api (where the .env lives)
-config({ path: resolve(process.cwd(), ".env") });
+config({ path: resolve(__dirname, "../../.env"), debug: true });
+// config({ path: resolve(process.cwd(), ".env"), debug: true });
 config({ path: resolve(process.cwd(), "../../apps/api/.env"), override: false });
 config({ path: resolve(process.cwd(), "../../../apps/api/.env"), override: false });
 
