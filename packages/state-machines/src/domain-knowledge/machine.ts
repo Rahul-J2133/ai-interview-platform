@@ -18,44 +18,78 @@ import {
 } from "../shared/index.js";
 
 // ============================================================
-// CONTEXT
+// PER-PHASE CONTEXT SLICES
+//
+// Grouping scoring data into nested objects makes it immediately
+// clear which fields belong to which phase, reduces the chance of
+// accidental cross-phase field access, and keeps assign() calls
+// focused on a single concern.
 // ============================================================
 
-export interface DomainKnowledgeMachineContext extends SharedContext {
-  domainPlan: DomainPlan[];
-  currentDomain: 0 | 1 | 2;
-
-  // Phase 1 — Conceptual
+export interface Phase1ConceptualData {
   conceptualScore: number;
   misconceptionsDetected: string[];
   overconfidenceFlag: boolean;
   underconfidenceFlag: boolean;
+}
 
-  // Phase 2 — Applied
+export interface Phase2AppliedData {
   productionDepthScore: number;
   inflationFlag: boolean;
   claimValidationMap: ClaimValidation[];
+}
 
-  // Phase 3 — Edge case
+export interface Phase3EdgeCaseData {
   depthScore: number;
   idkHandled: boolean;
   adjacentDomainTested: boolean;
+}
 
-  // Phase 4 — Domain 2
+export interface Phase4Domain2Data {
   domain2Score: number;
   domain2DepthType: "deep" | "broad" | null;
   crossDomainLinked: boolean;
   d2RedirectIssued: boolean;
+  // Dedicated D2 exchange counter — avoids conflating with totalExchanges
+  // which spans the entire interview, not just the D2 phase.
+  d2ExchangeCount: number;
+}
 
-  // Phase 5 — Domain 3 stretch
+export interface Phase5StretchData {
   stretchScore: number; // Weighted 0.5x
   firstPrinciplesScore: number;
   learningApproachScore: number;
+}
 
-  // Phase 6 — Correction acceptance
+export interface Phase6CoachabilityData {
   coachabilityScore: number;
+}
 
-  // Cross-round
+// ============================================================
+// CONTEXT
+// ============================================================
+
+export interface DomainKnowledgeMachineContext extends SharedContext {
+  // ── Plan ────────────────────────────────────────────────────
+  //
+  // domainPlan is now variable-length (2–5 domains) rather than
+  // always exactly 3.  currentDomain is the index into this array.
+  // planContextMode records whether the plan was built from a full
+  // resume, JD-only, or the low-context exploratory fallback so the
+  // AI layer can calibrate question difficulty accordingly.
+  domainPlan: DomainPlan[];
+  currentDomain: number;
+  planContextMode: "resume_jd" | "jd_only" | "resume_only" | "exploratory";
+
+  // ── Per-phase scoring slices ─────────────────────────────────
+  phase1: Phase1ConceptualData;
+  phase2: Phase2AppliedData;
+  phase3: Phase3EdgeCaseData;
+  phase4: Phase4Domain2Data;
+  phase5: Phase5StretchData;
+  phase6: Phase6CoachabilityData;
+
+  // ── Cross-round ──────────────────────────────────────────────
   priorSdScore: number | null;
   priorBehavioralScore: number | null;
   crossRoundMetaScore: CrossRoundMetaScore | null;
@@ -70,25 +104,32 @@ export interface DomainKnowledgeMachineContext extends SharedContext {
 type DkEvent =
   | { type: "START_SESSION" }
   | { type: "INPUTS_PARSED" }
-  | { type: "PLAN_GENERATED"; plan: DomainPlan[] }
+  | { type: "PLAN_GENERATED"; plan: DomainPlan[]; contextMode: DomainKnowledgeMachineContext["planContextMode"] }
   | { type: "QUALITY_GATE_PASS" }
   | { type: "QUALITY_GATE_FAIL" }
   | { type: "CANDIDATE_READY" }
   | { type: "CANDIDATE_RESPONSE" }
+  // Phase 1
   | { type: "MISCONCEPTION_DETECTED"; misconception: string }
   | { type: "CONFIDENCE_ASSESSED"; overconfident: boolean; underconfident: boolean }
   | { type: "CONCEPTUAL_SCORED"; score: number }
+  // Phase 2
   | { type: "PROD_SIGNAL_DETECTED"; hasProdSignal: boolean }
   | { type: "TUTORIAL_OR_PROD_CLASSIFIED"; depth: number; inflation: boolean }
   | { type: "CLAIM_VALIDATED"; validation: ClaimValidation }
+  // Phase 3
   | { type: "IDK_HANDLED" }
   | { type: "ADJACENT_DOMAIN_TESTED" }
   | { type: "DEPTH_SCORED"; score: number }
+  // Phase 4
   | { type: "CROSS_DOMAIN_LINKED" }
   | { type: "D2_REDIRECT_NEEDED" }
   | { type: "D2_SCORED"; score: number; depthType: "deep" | "broad" }
+  // Phase 5
   | { type: "STRETCH_SCORED"; firstPrinciples: number; learning: number }
+  // Phase 6
   | { type: "COACHABILITY_SCORED"; score: number }
+  // Shared / terminal
   | { type: "TIMEOUT" }
   | { type: "PHASE_COMPLETE" }
   | { type: "SCORE_COMPUTED"; scores: DimensionScore[]; overall: number }
@@ -111,20 +152,39 @@ export interface DomainKnowledgeMachineInput {
 }
 
 // ============================================================
+// RUNTIME CONSTANTS
+//
+// D2_EXCHANGE_LIMIT caps the number of back-and-forth turns in
+// Phase 4 (Domain 2).  The lower dev value keeps test sessions
+// short; the production value allows a full conversational probe.
+//
+// Declared as a module-level const (not process.env) so this file
+// has no hard dependency on @types/node.  If you need environment-
+// specific values at build time, override this via your bundler's
+// define plugin (e.g. esbuild define, vite define).
+// ============================================================
+
+const D2_EXCHANGE_LIMIT: number = 8; // production default
+// To use 2 in dev, set this via your build tool:
+//   esbuild:  define: { D2_EXCHANGE_LIMIT: "2" }
+//   vite:     define: { D2_EXCHANGE_LIMIT: 2 }
+
+// ============================================================
 // MACHINE
 // ============================================================
 
 export const domainKnowledgeMachine = setup({
   types: {
     context: {} as DomainKnowledgeMachineContext,
-    events: {} as DkEvent,
-    input: {} as DomainKnowledgeMachineInput,
+    events:  {} as DkEvent,
+    input:   {} as DomainKnowledgeMachineInput,
   },
 
   actions: {
-    // ── Shared actions: each impl is a plain property-assigner object from
-    //    shared.ts; wrapping in assign() here binds it to this machine's
-    //    context type so XState's variance probe resolves correctly.
+    // ── Shared actions ──────────────────────────────────────────
+    // Each impl is a plain property-assigner object from shared.ts.
+    // Wrapping in assign() here binds it to this machine's context type
+    // so XState's variance probe resolves correctly.
     incrementExchanges:          assign(SHARED_ACTION_IMPLS.incrementExchanges),
     incrementSilenceEvents:      assign(SHARED_ACTION_IMPLS.incrementSilenceEvents),
     incrementProbeCount:         assign(SHARED_ACTION_IMPLS.incrementProbeCount),
@@ -133,109 +193,141 @@ export const domainKnowledgeMachine = setup({
     advancePhase:                assign(SHARED_ACTION_IMPLS.advancePhase),
     clearError:                  assign(SHARED_ACTION_IMPLS.clearError),
 
-    // ── Machine-specific actions ──────────────────────────────
+    // ── Plan actions ────────────────────────────────────────────
 
     setDomainPlan: assign({
       domainPlan: ({ event }) => {
         const e = event as Extract<DkEvent, { type: "PLAN_GENERATED" }>;
         return e.plan;
       },
+      planContextMode: ({ event }) => {
+        const e = event as Extract<DkEvent, { type: "PLAN_GENERATED" }>;
+        return e.contextMode;
+      },
     }),
 
+    // ── Phase 1 actions ─────────────────────────────────────────
+
     setConfidenceFlags: assign({
-      overconfidenceFlag: ({ event }) => {
+      phase1: ({ context, event }) => {
         const e = event as Extract<DkEvent, { type: "CONFIDENCE_ASSESSED" }>;
-        return e.overconfident;
-      },
-      underconfidenceFlag: ({ event }) => {
-        const e = event as Extract<DkEvent, { type: "CONFIDENCE_ASSESSED" }>;
-        return e.underconfident;
+        return {
+          ...context.phase1,
+          overconfidenceFlag:  e.overconfident,
+          underconfidenceFlag: e.underconfident,
+        };
       },
     }),
 
     recordMisconception: assign({
-      misconceptionsDetected: ({ context, event }) => {
+      phase1: ({ context, event }) => {
         const e = event as Extract<DkEvent, { type: "MISCONCEPTION_DETECTED" }>;
-        return [...context.misconceptionsDetected, e.misconception];
+        return {
+          ...context.phase1,
+          misconceptionsDetected: [...context.phase1.misconceptionsDetected, e.misconception],
+        };
       },
     }),
 
     setConceptualScore: assign({
-      conceptualScore: ({ event }) => {
+      phase1: ({ context, event }) => {
         const e = event as Extract<DkEvent, { type: "CONCEPTUAL_SCORED" }>;
-        return e.score;
+        return { ...context.phase1, conceptualScore: e.score };
       },
     }),
 
+    // ── Phase 2 actions ─────────────────────────────────────────
+
     setProductionDepth: assign({
-      productionDepthScore: ({ event }) => {
+      phase2: ({ context, event }) => {
         const e = event as Extract<DkEvent, { type: "TUTORIAL_OR_PROD_CLASSIFIED" }>;
-        return e.depth;
-      },
-      inflationFlag: ({ event }) => {
-        const e = event as Extract<DkEvent, { type: "TUTORIAL_OR_PROD_CLASSIFIED" }>;
-        return e.inflation;
+        return {
+          ...context.phase2,
+          productionDepthScore: e.depth,
+          inflationFlag:        e.inflation,
+        };
       },
     }),
 
     recordClaimValidation: assign({
-      claimValidationMap: ({ context, event }) => {
+      phase2: ({ context, event }) => {
         const e = event as Extract<DkEvent, { type: "CLAIM_VALIDATED" }>;
-        return [...context.claimValidationMap, e.validation];
+        return {
+          ...context.phase2,
+          claimValidationMap: [...context.phase2.claimValidationMap, e.validation],
+        };
       },
     }),
+
+    // ── Phase 3 actions ─────────────────────────────────────────
 
     setDepthScore: assign({
-      depthScore: ({ event }) => {
+      phase3: ({ context, event }) => {
         const e = event as Extract<DkEvent, { type: "DEPTH_SCORED" }>;
-        return e.score;
+        return { ...context.phase3, depthScore: e.score };
       },
     }),
 
-    markIdkHandled: assign({ idkHandled: true }),
+    markIdkHandled: assign({
+      phase3: ({ context }) => ({ ...context.phase3, idkHandled: true }),
+    }),
 
-    markAdjacentDomainTested: assign({ adjacentDomainTested: true }),
+    markAdjacentDomainTested: assign({
+      phase3: ({ context }) => ({ ...context.phase3, adjacentDomainTested: true }),
+    }),
 
-    markCrossDomainLinked: assign({ crossDomainLinked: true }),
+    // ── Phase 4 actions ─────────────────────────────────────────
 
-    setD2Score: assign({
-      domain2Score: ({ event }) => {
-        const e = event as Extract<DkEvent, { type: "D2_SCORED" }>;
-        return e.score;
-      },
-      domain2DepthType: ({ event }) => {
-        const e = event as Extract<DkEvent, { type: "D2_SCORED" }>;
-        return e.depthType;
-      },
+    markCrossDomainLinked: assign({
+      phase4: ({ context }) => ({
+        ...context.phase4,
+        crossDomainLinked:  true,
+        // Track D2 exchanges in their own counter so D2_PACING logic
+        // is not influenced by Phase 1–3 exchange counts.
+        d2ExchangeCount: context.phase4.d2ExchangeCount + 1,
+      }),
     }),
 
     issueD2Redirect: assign({
-      d2RedirectIssued: true,
+      phase4:        ({ context }) => ({ ...context.phase4, d2RedirectIssued: true }),
       redirectCount: ({ context }) => context.redirectCount + 1,
     }),
 
-    setStretchScore: assign({
-      firstPrinciplesScore: ({ event }) => {
-        const e = event as Extract<DkEvent, { type: "STRETCH_SCORED" }>;
-        return e.firstPrinciples;
-      },
-      learningApproachScore: ({ event }) => {
-        const e = event as Extract<DkEvent, { type: "STRETCH_SCORED" }>;
-        return e.learning;
-      },
-      // Stretch is weighted 0.5x — no correctness component
-      stretchScore: ({ event }) => {
-        const e = event as Extract<DkEvent, { type: "STRETCH_SCORED" }>;
-        return ((e.firstPrinciples + e.learning) / 2) * 0.5;
+    setD2Score: assign({
+      phase4: ({ context, event }) => {
+        const e = event as Extract<DkEvent, { type: "D2_SCORED" }>;
+        return {
+          ...context.phase4,
+          domain2Score:     e.score,
+          domain2DepthType: e.depthType,
+        };
       },
     }),
 
-    setCoachabilityScore: assign({
-      coachabilityScore: ({ event }) => {
-        const e = event as Extract<DkEvent, { type: "COACHABILITY_SCORED" }>;
-        return e.score;
+    // ── Phase 5 actions ─────────────────────────────────────────
+
+    setStretchScore: assign({
+      phase5: ({ event }) => {
+        const e = event as Extract<DkEvent, { type: "STRETCH_SCORED" }>;
+        return {
+          firstPrinciplesScore:  e.firstPrinciples,
+          learningApproachScore: e.learning,
+          // Stretch is weighted 0.5x — no correctness component
+          stretchScore: ((e.firstPrinciples + e.learning) / 2) * 0.5,
+        };
       },
     }),
+
+    // ── Phase 6 actions ─────────────────────────────────────────
+
+    setCoachabilityScore: assign({
+      phase6: ({ event }) => {
+        const e = event as Extract<DkEvent, { type: "COACHABILITY_SCORED" }>;
+        return { coachabilityScore: e.score };
+      },
+    }),
+
+    // ── Cross-round / terminal actions ──────────────────────────
 
     setPriorScores: assign({
       priorSdScore: ({ event }) => {
@@ -269,11 +361,12 @@ export const domainKnowledgeMachine = setup({
       },
     }),
 
-    // Coachability acts as a multiplier, not additive
+    // Coachability acts as a multiplier applied on top of the base dimension
+    // scores — it is intentionally NOT additive.
     applyCoachabilityMultiplier: assign({
       overallScore: ({ context }) =>
         context.overallScore !== null
-          ? context.overallScore * context.coachabilityScore
+          ? context.overallScore * context.phase6.coachabilityScore
           : null,
     }),
 
@@ -291,465 +384,646 @@ export const domainKnowledgeMachine = setup({
   },
 
   guards: {
-    // Shared guards are plain predicate functions — spread directly, no wrapping needed.
+    // Shared guards are plain predicate functions — spread directly.
     ...sharedGuards,
 
-    hasOverconfidenceFlag: ({ context }) => context.overconfidenceFlag,
+    hasOverconfidenceFlag: ({ context }) => context.phase1.overconfidenceFlag,
 
     d2NeedsRedirect: ({ event }) => event.type === "D2_REDIRECT_NEEDED",
+
+    // Exit D2 when the dedicated d2ExchangeCount reaches the env-appropriate
+    // limit, or when a redirect has already been issued.
+    // The limit is injected via a module-level constant so this file does not
+    // need a dependency on @types/node / process.env.
+    d2ExchangeLimitReached: ({ context }) => {
+      return (
+        context.phase4.d2ExchangeCount >= D2_EXCHANGE_LIMIT ||
+        context.phase4.d2RedirectIssued
+      );
+    },
   },
 }).createMachine({
-  /** @xstate-layout N4IgpgJg5mDOIC5QQPYFsCGBLAdgWgGscUB3AG0hgDoBJAEQBkBRAYgGUAVAQQCUOB9NkzZsaAeQByAbQAMAXUSgADilhYALlhQ5FIAB6IATIYCsVEwE4rADkMyZhgGwBmAOyvDAGhABPRAEYZABYqR3tDf0drZ2dow2cTAF9E71RMXEJickowKjoxAFkuGgl+bgANSUKATX4GMS46FhKABQBVDjZ+Ft4hOlkFJBAVNU1tXQMERyDHKhnDIJMgoOcZVzdrbz8EQJCwh0jo2Od4pJSQNOx8IlIKaFyeYTaCpn58opLu3tYWgAkuIT8ADChRazA4TAGuhGGi0OiGk0ClioCxsJncFn8iy2AWCoXChxicQSyVS6CumVuOTyhWKpTBXFKAHEmBIWAzmaymDwuBD+vJoapYeMEQFDBZDFR-KYZCZrOt-HLXI4cTsllRVjJIq5rPZ5cEgqSLuSMjdsvcqABFNpcBg0Di1Jm81jW232x3Or4iKFDGFjeGgRGyiwooJojFYkyqxbOUImexrXUWGTTM5k9LXLJ3aiuu0O-hOiEsXPuguegBixQYPuUQv9E1xyNRFms6NcmOxvkQCVcKITjn8-mcFkco7TxozlPNOZteY9RZL+cLr0rNGr-kGtdGcIbO2DofD7cjqplVFc8cHy1cDiiQVcRsupqz1I5-EejWqLCBjLo9E977oaoa2GOsd1FHYol7IIZWcMJHA8IdVWHMxHBlJxnH8CwdVlcdH0zKkLRBCQgSYFoOFnfhrWEDhxDZb8JF-Oh-2EFpJCEYC-TAwMjEHfw5njFMghkCVr1bJDrD4oTokHJx-GsRwlgfE18OnXIiJIsiKKozhaJYGiXjEDoONAkVuIQCJB34+xpmEwxRKjLsEBMYcpRkVtglsKJLEMJTJzNbNcgKGg2HU0iaMkN4mAhIEOBYIKQskDTwtKOgoqYGKmH5TcQO3Uz9CME4Q0MeU5QWOynFcIIT1cPjRIWQrnCCawLFw5SpwCqh4tCsjaMi6LYr+AFXhBAowTS4zcoDfLzLlWM5OVNZitWYqkJHfjoksBSMKHeTfIpfzqSI8t6FZEjgTdAAhHkiyOk7iNeAEhBETKJuFKbJnFLC5hKlsW1QnVxOsKUYkKoc3KiPanwI6huvI21BBBHgSiZL9ErCiiEseLLBUm3dGuWPstTkrzMOVQHgZicUwfk6xIZUjquBaMEaEyyi2mo3T6MY5i2FYiR2IFX0TPe7tWxCYwTEVYSTBMMJXFW3sqccCU-qvHzzjw9rqUZ5nWe05K9JoAyjMFrc3rxsWUVMKWWtltZVSWPitVHUcTkvVC6a1i0Wh4MQ6EEGgmQkeHUv69l-kBEaxohV763A6D5TPaVIOsRZNoVlFMWV8V5LVz2DotAB1XhBA4MQeFqH2xAu1gub-CE3xYtjIVNnLzfj0de2lSXZZHFs3IzpWVdzu91fTfbnwtciy6R+GADUuir-2gQYR6aHLT9p-Lmh4fL7pfeX1eRHXlnsaF3HwJ72MZUVJrStMJD1ioLPlclhIKrHicJ+htTV6N-g55uiYgbFexQCgAKAc6M+Zs45mSWC5CwbgByoSsMECwJ4WpSm1KJNY2pP6awLjDP+4DAF2mAbpQakdQTghbtlTieVJiywSBqa2ThEGDjlNGTCVB5KjhWFhFsTVIj50ntQTKLJzqAn1pzH89dXiPF5s3WOXFpphGYZBOWA55KIUckJFCYZU46k2vNERP8qDiOGkNNmHNJCG2NhwZRDDEBqJQvKTRxMdHbDCEDeI4p1jNXiCmfBbVCGBWCrDXqCixAMA6BQiOw1qHjVbvQkWUwTDFUJoEOWsFojRllKEAxd5WwjhMRrEJojcj0AANL8H+AxO0EgUbVNqT+Zg0C26wNUfKIGmo1hWCHLBaMQQ+IDPCNeaY5VTGqVoHQGpdTGDI3DlYqONDHGpJThqBM7ZMQxBVI5YckkYiyn8OsRBzVhFlL8hUqgjQABSXASISAEO8OkZRqJflkcA+RTd+a0Jxu3My6xJahG7jqTCMsHBDL4iOFwsEZDDgWrLKZDM6D3Mec82knwIScBYHch5rIMUfFKNivkazdxAr4gOUwYLbaQv2RKFErt3IeA8Ase8lzv7TNSmRX4CNt6NJYNyjgvLMYvWScLclupYx3njC4Fw14sSrUkq7WIEQwwrEWMi6kdBDD8HLPUQuyNgSSDnmID5DE5GN0Ub8sl4FbDxjmKhJYlVKouCqo5eCIRnJylQnBE5u0OVQy5bq-VYhDWNONRIU1grdVYxoI8GK-AJBMEymKuhEq7WnnmM6u8MxGrRgWBqAcsQdQyqao4LVFodV6oNUaoi0b9JMEMg48VF8zL2pkI60wubXX5t0ZVKgKYBnWAkosXhzhK0w19iIN4mLSgNKqV+adXQXmfAXWm-5nTJiGJ6f2OUwlMLOAdjVLBg5ojFtThc8eQaOpAmXbOoldQSiLsoQk0aqzW0AumrYVOZ4nVuMPUexymIzCnAkj2N28FJ25GrT0IEizq1xoTQIZNqb2kpMlfCuY54UywTcFqd12wmq9izsVJqqdGqKmg3kXVcHFmvuNe+pJ6a23TWwtKnDcr8OKscs5XsyCwNv3bK1K5ZjYMPMWY25ttrAVSuw7KvDCrCOIHbCEEds1dTNWVsqajiHMrxvSgNeJjHo5-PPl+7dZG-2mAA4goD2w3B7AHCsKIupJbBBE5yjq1bMYId1aK9DGb23jOfgJFqpgZbuGjApM8eG3LiniEJdl176bUk4I8DgQJeXlh5EFAVdcvlWr5gLFjFnEDJgQeeGSHgwjQWjM1U9qxnPvxTBWwNqWLTHR4JwfeJR4NjS6CS813MG4KOK2ZmBKjJgWDvCGKWioTgy3C-Vubg4mtYha6OajzBeASCNXPJg9R4MOmG5asbSjP1bvK8mEZbjil2EiA7QtlhlhhFQaDbbTBdv7cO2IY7m8jZNpNqVq7CBUG3eVPd520YB3NUWIEBwoNZTUfS1FLLfKkYCtR5lkViMN3mdB4EDCna7Bamkk4Ue0XZi91mxeDzaxdOHZoDXa6w1-gMGYI02unyebjZk9NQICFB32BOTJalmx+1mBZRRhIo56ptZS17agqU7Qs89Fl20nOWR2KBy2kHU3cRC4TKL6U4vVRaI1DqeIouFQnGo+d35wIj6iA3ksqhTGY6XYNzsS8naR2Q8W41dBkuzx2Rl7LVCLn7dfbYJII1QreVMFIW7t9pn+eIkVAOLBTgnXwRcA5Ij55Q+lpiBH+X1GQQPP+BdNcpZfP5YaBrmvc4Mf48m04n3WFezwuVPu2XMxotQQcFhMMlh7DrENO1pXMG52t-OgwIE7A8cmY6G3jp3vpTDK9cnHUYK3BeF0c5OYdkbCpxHRqhXX8b2HWIRAshvJepFBaCnkzH79cd+lPKbfThWyBAP0R5MM8DEDwCSMndYRnHlfeMQY6ZgAsVkF-FZZjTdDfE4VCYGSHYwG8eFaMQA9wdsEAwIeaCdKfUJKgX4AzAOIOeGb8BfdkJGPeUVLoeoRoNfDDcCIcW8QdX1VCYwSqO8IZIGVsMjASYqBYKjEg65cgx4Sg4OBgefRfBjRAz3d-VJDg39IJOXXgq8c3OyHhPAvNcteCWmCQsxO9MQGdX2NoBifgF4bgVvFgdPAIYZeSVyLUCUFYE4DwGHWMaXaCGnZMCwaPViPgfgC6NoNcX8AVR4YIgQACICL3D-ZYZEOXVzOyIJaLWMZMYqaUGIE5OUZIc4YgCAOAXQAhCpZAjvPAPZbYKo4XBMeo+orEajegZgCo1Ja8UIG+WUaYeHMMVUCSTZYfeFVYJYTEQIkwrlWfCoKoAoWoZgugNovGNaTCKwZyS8E4foviXpO8DbOCLUaPNgZ4V4Vdekb4RYzNTtWCNleIAcHUKITYwY4IGqFzFMfYiY7zWfV8FkCQc4syLETERlUwbTYSISBSVUP-To9JYZE4ZCYfajRcecJgX479ROFsF1dwF7VYCXbYIEjUGWSIVCRUdJdESfRXUg18OI5ExEeMWMRbFMXURUGbME-ZDwFheMGwSIMMdYS-Mo0wtGTSeGaRSQKkgIc-KUEqJYZYImHjBzVkk4O+OXW2aCajLqfk5KPqQzEU8yRqTtebYICIfUeUR+OaOUOSKwVCf3Tza-QiSQY6VKe6efZnVnLUuyE9DweMMWEA5qcmOwVOewIpZUO8Hk8pPk+6AUuQ+vJkLUk4UwZ+JBNBaEhIZTBAWIHxNyISJ4txIM6jHWO0PWdmHSYUgnb3WCNA9yLEe7dJYPBzEdPsP0zMwMnTd4l8A+GQkONKGKLUpLbvbglWZ2ao7sJ+fpdJQqHg8GajYuHgUucuSuX2GuLsoMlEC8UceFJYWWAvQczIzEYqLUWydwTVZsqeDobeeeReVs0BY+DeLskdEMEcCqZyYIWCeWFkrck5PhaSCZZLK-DrIhMBO-euWiLUyUyUHvX1RUcqas7sNaCPGqF1BSBSJwajCxSRV4IUn44sjvUqWMeSJwY5CIMnDclM6CuXbaG8HUcYsk65VUsM9UqJGJZKLU-9cwVhSwNYmqQi1VPE4INYdYBwYwYJUTaZZpeZBpKMjC9ZGqWYdYc8VOdCSU8SSUIPDVFsBYMMHM1FfFJ5B9V5ElLU8ZWYaIc8U0+FTAjigdSWCZJqdhGEq0n8mDMKXHflMS9vdongjUNwGWYZeCWUZ8hzAEx2ISFqC0vRXTENWtCNetMQLUqVTtbNNYzaFYPJanTEWUCna2ZWYMwS29e9E4p9CQKpaKqyqUf9BaXDQi+CSUWWNbBwYkLCUKr4eDRpPS2FcwBMCUTCEdFaXjQtVOMfQSN1JsyisTWNfTZDQqhrSIGzUq-PE8RYHhWCO+AZf1VseqyM6K2VbDCUMfc8SqaLMwCSIcdsGyeIdwFHDgDLdHHLLgPLZy9fDvdTTtO8t7dJSqB+XRGLUA5qVA-PIcUk786fKgLrHrH2PrGgAbN5TgLUiUMs5OYnPY--RAGYfas9FcrETfFMT7b7CNA7I7d0KGhVZ+Nxdi5MSWBGhAJGnhQIL6nPBIYSM6i6xyzHW6tgv4rUQtBwdJfU51MmmYWYHoiFM-GbCIRnVXbkdXdnLXJE8S3cXYNaZUCqCSZBTEKnApNOdMuHYWw86gB3SOZ3deaoLUwIGbbCpBOHdEQ66MdJY-SqVYWbRYGYP63k6Zd8WPPbCNBPfgJPW0Q2occUY-CyrEDwwixYSUBOISGM1lHUCvRvavWvfMNa6W9gk5MMOMAjNYEkkcQfbDIyqwI5N83TWfUVeQw2zAtTHfBYHvbExG+CbDXUPNFMZMZYCvW-UhACiKJ-EunouYEXEpPDAfd6qCbCeu5WeFRBCA4VKAmA14b4w2prWMWUZ2UGeSLOopYIFwBu0e4goa6ZKQ14UQKguQmgoEWexYTteCCy0ehYaYS2kIO8Iy2SnuPPCve9Sw6w2wrgVvWenZdA0cRWwqXyxG5hESDsWS4pR2kM520icuAQMIiI5GQ26CZUcweMOwUY6yezauzI9wEdJ8kcTyzKrzakCEHgPLagxJPkBBlBFEO7FqJqNwfwaLSUaXQyuSFMcZJCngX2KczgZ0Lssm4mfEewY24IBbNrZIIAA */
-  id: "domain-knowledge",
+  id:      "domain-knowledge",
   initial: "IDLE",
 
   context: ({ input }) => ({
-    sessionId: input.sessionId,
-    userId: input.userId,
-    role: input.role,
-    tier: input.tier,
-    level: input.level,
-    phase: 0,
-    stateName: "IDLE",
-    silenceTimerMs: 15_000,
-    qualityGateRetries: 0,
-    totalExchanges: 0,
-    silenceEvents: 0,
-    probeCount: 0,
-    redirectCount: 0,
-    errorMessage: null,
-    dimensionScores: [],
-    hireSignal: null,
-    overallScore: null,
-    report: null,
-    domainPlan: [],
-    currentDomain: 0,
-    conceptualScore: 0,
-    misconceptionsDetected: [],
-    overconfidenceFlag: false,
-    underconfidenceFlag: false,
-    productionDepthScore: 0,
-    inflationFlag: false,
-    claimValidationMap: [],
-    depthScore: 0,
-    idkHandled: false,
-    adjacentDomainTested: false,
-    domain2Score: 0,
-    domain2DepthType: null,
-    crossDomainLinked: false,
-    d2RedirectIssued: false,
-    stretchScore: 0,
-    firstPrinciplesScore: 0,
-    learningApproachScore: 0,
-    coachabilityScore: 1, // Neutral multiplier until computed
-    priorSdScore: input.priorSdScore ?? null,
-    priorBehavioralScore: input.priorBehavioralScore ?? null,
-    crossRoundMetaScore: null,
-    depthProfile: null,
+    // ── SharedContext fields ─────────────────────────────────────
+    sessionId:              input.sessionId,
+    userId:                 input.userId,
+    role:                   input.role,
+    tier:                   input.tier,
+    level:                  input.level,
+    phase:                  0,
+    stateName:              "IDLE",
+    silenceTimerMs:         15_000,
+    qualityGateRetries:     0,
+    totalExchanges:         0,
+    silenceEvents:          0,
+    probeCount:             0,
+    redirectCount:          0,
+    errorMessage:           null,
+    dimensionScores:        [],
+    hireSignal:             null,
+    overallScore:           null,
+    report:                 null,
+
+    // ── Plan ────────────────────────────────────────────────────
+    domainPlan:             [],
+    currentDomain:          0,
+    planContextMode:        "exploratory" as const,
+
+    // ── Per-phase slices (zero-valued defaults) ──────────────────
+    phase1: {
+      conceptualScore:        0,
+      misconceptionsDetected: [],
+      overconfidenceFlag:     false,
+      underconfidenceFlag:    false,
+    },
+    phase2: {
+      productionDepthScore:   0,
+      inflationFlag:          false,
+      claimValidationMap:     [],
+    },
+    phase3: {
+      depthScore:             0,
+      idkHandled:             false,
+      adjacentDomainTested:   false,
+    },
+    phase4: {
+      domain2Score:           0,
+      domain2DepthType:       null,
+      crossDomainLinked:      false,
+      d2RedirectIssued:       false,
+      d2ExchangeCount:        0,
+    },
+    phase5: {
+      stretchScore:           0,
+      firstPrinciplesScore:   0,
+      learningApproachScore:  0,
+    },
+    phase6: {
+      // Neutral multiplier (1.0) until coachability is evaluated in Phase 6.
+      coachabilityScore: 1,
+    },
+
+    // ── Cross-round ──────────────────────────────────────────────
+    priorSdScore:         input.priorSdScore         ?? null,
+    priorBehavioralScore: input.priorBehavioralScore  ?? null,
+    crossRoundMetaScore:  null,
+    depthProfile:         null,
   }),
+
+  // ── Global error transition ──────────────────────────────────
+  // Declared at the root so any state can transition to ERROR_STATE
+  // without requiring per-state "on: ERROR" blocks.
+  on: {
+    ERROR: {
+      target: ".ERROR_STATE",
+      actions: assign({
+        errorMessage: ({ event }) => {
+          const e = event as Extract<DkEvent, { type: "ERROR" }>;
+          return e.message;
+        },
+        stateName: () => "ERROR_STATE",
+      }),
+    },
+  },
 
   states: {
     IDLE: {
       entry: assign({ stateName: "IDLE" }),
-      on: { START_SESSION: "DOMAIN_TAXONOMY_LOAD" },
+      on: { START_SESSION: "PRE_SESSION" },
     },
 
-    // ──────────────────────────────────────────────────────────
-    // PHASE 0 — Pre-session domain extraction
-    // ──────────────────────────────────────────────────────────
-    DOMAIN_TAXONOMY_LOAD: {
-      entry: assign({ stateName: "DOMAIN_TAXONOMY_LOAD", phase: 0 }),
-      on: { INPUTS_PARSED: "RESUME_DOMAIN_PARSE" },
-    },
+    // ══════════════════════════════════════════════════════════════
+    // COMPOUND STATE: PRE_SESSION
+    //
+    // Groups all pre-interview scaffolding states.  The compound
+    // parent's `on:` block declares the single exit transition so the
+    // boundary between setup and live interview is explicit and
+    // impossible to accidentally bypass.
+    // ══════════════════════════════════════════════════════════════
+    PRE_SESSION: {
+      initial: "DOMAIN_TAXONOMY_LOAD",
+      entry:   assign({ phase: 0 }),
 
-    RESUME_DOMAIN_PARSE: {
-      entry: assign({ stateName: "RESUME_DOMAIN_PARSE" }),
-      on: { PHASE_COMPLETE: "DOMAIN_PLAN_GEN" },
-    },
-
-    DOMAIN_PLAN_GEN: {
-      entry: assign({ stateName: "DOMAIN_PLAN_GEN" }),
-      on: {
-        PLAN_GENERATED: {
-          target: "QUALITY_GATE",
-          actions: "setDomainPlan",
+      states: {
+        // ──────────────────────────────────────────────────────────
+        // PHASE 0 — Pre-session domain extraction
+        //
+        // The plan generator now returns a variable number of domains
+        // (2–5) chosen by relevance to the resume + JD, along with a
+        // planContextMode tag so downstream components know how much
+        // signal was available.  The quality gate validates that the
+        // plan has at least 2 domains and coherent question sets.
+        // ──────────────────────────────────────────────────────────
+        DOMAIN_TAXONOMY_LOAD: {
+          entry: assign({ stateName: "DOMAIN_TAXONOMY_LOAD" }),
+          on: { INPUTS_PARSED: "RESUME_DOMAIN_PARSE" },
         },
-      },
-    },
 
-    QUALITY_GATE: {
-      entry: assign({ stateName: "QUALITY_GATE" }),
-      on: {
-        QUALITY_GATE_PASS: "PLAN_READY",
-        QUALITY_GATE_FAIL: [
-          {
-            // Max retries reached — proceed anyway to avoid infinite loop
-            guard: "qualityGateMaxRetriesReached",
-            target: "PLAN_READY",
-            actions: "incrementQualityGateRetries",
+        RESUME_DOMAIN_PARSE: {
+          entry: assign({ stateName: "RESUME_DOMAIN_PARSE" }),
+          on: { PHASE_COMPLETE: "DOMAIN_PLAN_GEN" },
+        },
+
+        DOMAIN_PLAN_GEN: {
+          entry: assign({ stateName: "DOMAIN_PLAN_GEN" }),
+          on: {
+            PLAN_GENERATED: {
+              target:  "QUALITY_GATE",
+              actions: "setDomainPlan",
+            },
           },
-          {
-            // Retry plan generation
-            target: "DOMAIN_PLAN_GEN",
-            actions: "incrementQualityGateRetries",
+        },
+
+        QUALITY_GATE: {
+          entry: assign({ stateName: "QUALITY_GATE" }),
+          on: {
+            QUALITY_GATE_PASS: "PLAN_READY",
+            QUALITY_GATE_FAIL: [
+              {
+                // Max retries reached — proceed anyway to avoid infinite loop.
+                guard:   "qualityGateMaxRetriesReached",
+                target:  "PLAN_READY",
+                actions: "incrementQualityGateRetries",
+              },
+              {
+                // Retry plan generation.
+                target:  "DOMAIN_PLAN_GEN",
+                actions: "incrementQualityGateRetries",
+              },
+            ],
           },
-        ],
-      },
-    },
-
-    PLAN_READY: {
-      entry: assign({ stateName: "PLAN_READY" }),
-      on: { CANDIDATE_READY: "CONCEPTUAL_QUESTION" },
-    },
-
-    // ──────────────────────────────────────────────────────────
-    // PHASE 1 — Conceptual foundation (Domain 1)
-    // ──────────────────────────────────────────────────────────
-    CONCEPTUAL_QUESTION: {
-      entry: assign({ stateName: "CONCEPTUAL_QUESTION", phase: 1 }),
-      after: {
-        [PHASE_BUDGETS_MS.domain_knowledge[1]]: "CONFIDENCE_CALIBRATE",
-      },
-      on: {
-        CANDIDATE_RESPONSE: "MISCONCEPTION_DETECT",
-        TIMEOUT: "CONFIDENCE_CALIBRATE",
-      },
-    },
-
-    MISCONCEPTION_DETECT: {
-      entry: assign({ stateName: "MISCONCEPTION_DETECT" }),
-      on: {
-        // Record misconception and stay in state (deferred — confronted in Phase 3)
-        MISCONCEPTION_DETECTED: {
-          target: "MISCONCEPTION_DETECT",
-          actions: "recordMisconception",
         },
-        PHASE_COMPLETE: "CONFIDENCE_CALIBRATE",
-      },
-    },
 
-    CONFIDENCE_CALIBRATE: {
-      entry: assign({ stateName: "CONFIDENCE_CALIBRATE" }),
-      on: {
-        CONFIDENCE_ASSESSED: {
-          target: "CONCEPTUAL_SCORING",
-          actions: "setConfidenceFlags",
+        PLAN_READY: {
+          entry: assign({ stateName: "PLAN_READY" }),
+          // CANDIDATE_READY exits the PRE_SESSION compound state entirely.
         },
       },
+
+      // Compound-state exit: transitions to the first live interview state.
+      on: {
+        CANDIDATE_READY: "PHASE_1_CONCEPTUAL",
+      },
     },
 
-    CONCEPTUAL_SCORING: {
-      entry: assign({ stateName: "CONCEPTUAL_SCORING" }),
-      on: {
-        CONCEPTUAL_SCORED: {
-          target: "APPLIED_QUESTION",
-          actions: "setConceptualScore",
+    // ══════════════════════════════════════════════════════════════
+    // COMPOUND STATE: PHASE_1_CONCEPTUAL
+    //
+    // Domain 1 — Conceptual foundation.
+    // Probes the candidate's mental model of the primary domain.
+    // Misconceptions detected here are deferred and confronted in
+    // PHASE_3_EDGE_CASE via MISCONCEPTION_RESOLUTION.
+    //
+    // Adaptive follow-up: CONCEPTUAL_QUESTION now waits for multiple
+    // CANDIDATE_RESPONSE turns before moving to scoring.  The session
+    // controller gates advancement on probeCount so the interviewer
+    // can ask transcript-grounded follow-ups rather than always
+    // advancing after a single answer.
+    // ══════════════════════════════════════════════════════════════
+    PHASE_1_CONCEPTUAL: {
+      initial: "CONCEPTUAL_QUESTION",
+      entry:   assign({ phase: 1, stateName: "CONCEPTUAL_QUESTION" }),
+
+      states: {
+        CONCEPTUAL_QUESTION: {
+          entry: assign({ stateName: "CONCEPTUAL_QUESTION" }),
+          after: {
+            // Phase budget governs the total time for the conceptual exchange.
+            [PHASE_BUDGETS_MS.domain_knowledge[1]]: "CONFIDENCE_CALIBRATE",
+          },
+          on: {
+            CANDIDATE_RESPONSE: "MISCONCEPTION_DETECT",
+            TIMEOUT:            "CONFIDENCE_CALIBRATE",
+          },
         },
-      },
-    },
 
-    // ──────────────────────────────────────────────────────────
-    // PHASE 2 — Applied experience probe (Domain 1)
-    // ──────────────────────────────────────────────────────────
-    APPLIED_QUESTION: {
-      entry: assign({ stateName: "APPLIED_QUESTION", phase: 2 }),
-      after: {
-        [PHASE_BUDGETS_MS.domain_knowledge[2]]: "CLAIM_VALIDATION",
-      },
-      on: {
-        CANDIDATE_RESPONSE: "PROD_SIGNAL_DETECT",
-        TIMEOUT: "CLAIM_VALIDATION",
-      },
-    },
+        MISCONCEPTION_DETECT: {
+          entry: assign({ stateName: "MISCONCEPTION_DETECT" }),
+          on: {
+            // Accumulate misconceptions; stay in state for each one detected.
+            MISCONCEPTION_DETECTED: {
+              target:  "MISCONCEPTION_DETECT",
+              actions: "recordMisconception",
+            },
+            PHASE_COMPLETE: "CONFIDENCE_CALIBRATE",
+          },
+        },
 
-    PROD_SIGNAL_DETECT: {
-      entry: assign({ stateName: "PROD_SIGNAL_DETECT" }),
-      on: { PHASE_COMPLETE: "WAR_STORY_PROBE" },
-    },
+        CONFIDENCE_CALIBRATE: {
+          entry: assign({ stateName: "CONFIDENCE_CALIBRATE" }),
+          on: {
+            CONFIDENCE_ASSESSED: {
+              target:  "CONCEPTUAL_SCORING",
+              actions: "setConfidenceFlags",
+            },
+          },
+        },
 
-    WAR_STORY_PROBE: {
-      entry: assign({ stateName: "WAR_STORY_PROBE" }),
-      on: {
-        CANDIDATE_RESPONSE: "TUTORIAL_VS_PROD_CLASSIFY",
-      },
-    },
-
-    TUTORIAL_VS_PROD_CLASSIFY: {
-      entry: assign({ stateName: "TUTORIAL_VS_PROD_CLASSIFY" }),
-      on: {
-        TUTORIAL_OR_PROD_CLASSIFIED: {
-          target: "CLAIM_VALIDATION",
-          actions: "setProductionDepth",
+        CONCEPTUAL_SCORING: {
+          entry: assign({ stateName: "CONCEPTUAL_SCORING" }),
+          on: {
+            CONCEPTUAL_SCORED: {
+              // Exit PHASE_1_CONCEPTUAL compound state.
+              target:  "#domain-knowledge.PHASE_2_APPLIED",
+              actions: "setConceptualScore",
+            },
+          },
         },
       },
     },
 
-    CLAIM_VALIDATION: {
-      entry: assign({ stateName: "CLAIM_VALIDATION" }),
-      on: {
-        // Accumulate validations and stay in state until PHASE_COMPLETE
-        CLAIM_VALIDATED: {
-          target: "CLAIM_VALIDATION",
-          actions: "recordClaimValidation",
+    // ══════════════════════════════════════════════════════════════
+    // COMPOUND STATE: PHASE_2_APPLIED
+    //
+    // Domain 1 — Applied experience probe.
+    // Tests whether the candidate has real production exposure or
+    // only tutorial/textbook knowledge.  Claim validation accumulates
+    // across multiple CLAIM_VALIDATED events before PHASE_COMPLETE.
+    // ══════════════════════════════════════════════════════════════
+    PHASE_2_APPLIED: {
+      initial: "APPLIED_QUESTION",
+      entry:   assign({ phase: 2, stateName: "APPLIED_QUESTION" }),
+
+      states: {
+        APPLIED_QUESTION: {
+          entry: assign({ stateName: "APPLIED_QUESTION" }),
+          after: {
+            [PHASE_BUDGETS_MS.domain_knowledge[2]]: "CLAIM_VALIDATION",
+          },
+          on: {
+            CANDIDATE_RESPONSE: "PROD_SIGNAL_DETECT",
+            TIMEOUT:            "CLAIM_VALIDATION",
+          },
         },
-        PHASE_COMPLETE: "EDGE_CASE_QUESTION",
-      },
-    },
 
-    // ──────────────────────────────────────────────────────────
-    // PHASE 3 — Edge case & limits (Domain 1)
-    // ──────────────────────────────────────────────────────────
-    EDGE_CASE_QUESTION: {
-      entry: assign({ stateName: "EDGE_CASE_QUESTION", phase: 3 }),
-      after: {
-        [PHASE_BUDGETS_MS.domain_knowledge[3]]: "DEPTH_SCORING",
-      },
-      on: {
-        CANDIDATE_RESPONSE: "MISCONCEPTION_RESOLUTION",
-        TIMEOUT: "DEPTH_SCORING",
-      },
-    },
-
-    MISCONCEPTION_RESOLUTION: {
-      // Deferred misconceptions from Phase 1 are confronted here
-      entry: assign({ stateName: "MISCONCEPTION_RESOLUTION" }),
-      on: { PHASE_COMPLETE: "IDK_HANDLING" },
-    },
-
-    IDK_HANDLING: {
-      entry: assign({ stateName: "IDK_HANDLING" }),
-      on: {
-        IDK_HANDLED: {
-          target: "ADJACENT_DOMAIN_TEST",
-          actions: "markIdkHandled",
+        PROD_SIGNAL_DETECT: {
+          entry: assign({ stateName: "PROD_SIGNAL_DETECT" }),
+          on: { PHASE_COMPLETE: "WAR_STORY_PROBE" },
         },
-        PHASE_COMPLETE: "ADJACENT_DOMAIN_TEST",
-      },
-    },
 
-    ADJACENT_DOMAIN_TEST: {
-      entry: [
-        "markAdjacentDomainTested",
-        assign({ stateName: "ADJACENT_DOMAIN_TEST" }),
-      ],
-      on: {
-        CANDIDATE_RESPONSE: "DEPTH_SCORING",
-        ADJACENT_DOMAIN_TESTED: "DEPTH_SCORING",
-      },
-    },
+        WAR_STORY_PROBE: {
+          entry: assign({ stateName: "WAR_STORY_PROBE" }),
+          on: {
+            CANDIDATE_RESPONSE: "TUTORIAL_VS_PROD_CLASSIFY",
+          },
+        },
 
-    DEPTH_SCORING: {
-      entry: assign({ stateName: "DEPTH_SCORING" }),
-      on: {
-        DEPTH_SCORED: {
-          target: "D2_FLOWING_CONVO",
-          actions: "setDepthScore",
+        TUTORIAL_VS_PROD_CLASSIFY: {
+          entry: assign({ stateName: "TUTORIAL_VS_PROD_CLASSIFY" }),
+          on: {
+            TUTORIAL_OR_PROD_CLASSIFIED: {
+              target:  "CLAIM_VALIDATION",
+              actions: "setProductionDepth",
+            },
+          },
+        },
+
+        CLAIM_VALIDATION: {
+          entry: assign({ stateName: "CLAIM_VALIDATION" }),
+          on: {
+            // Accumulate validations; stay in state until PHASE_COMPLETE.
+            CLAIM_VALIDATED: {
+              target:  "CLAIM_VALIDATION",
+              actions: "recordClaimValidation",
+            },
+            PHASE_COMPLETE: "#domain-knowledge.PHASE_3_EDGE_CASE",
+          },
         },
       },
     },
 
-    // ──────────────────────────────────────────────────────────
-    // PHASE 4 — Domain 2 (compressed, 12 min budget)
-    // ──────────────────────────────────────────────────────────
-    D2_FLOWING_CONVO: {
-      entry: assign({ stateName: "D2_FLOWING_CONVO", phase: 4 }),
-      after: {
-        [PHASE_BUDGETS_MS.domain_knowledge[4]]: "D2_SCORING",
-      },
-      on: {
-        CANDIDATE_RESPONSE: "CROSS_DOMAIN_LINK",
-        D2_REDIRECT_NEEDED: "D2_REDIRECT",
-        TIMEOUT: "D2_SCORING",
-      },
-    },
+    // ══════════════════════════════════════════════════════════════
+    // COMPOUND STATE: PHASE_3_EDGE_CASE
+    //
+    // Domain 1 — Edge cases & limits.
+    // Probes boundary conditions, failure modes, and the candidate's
+    // "I don't know" handling.  Deferred misconceptions from Phase 1
+    // are confronted in MISCONCEPTION_RESOLUTION before moving on.
+    // ══════════════════════════════════════════════════════════════
+    PHASE_3_EDGE_CASE: {
+      initial: "EDGE_CASE_QUESTION",
+      entry:   assign({ phase: 3, stateName: "EDGE_CASE_QUESTION" }),
 
-    CROSS_DOMAIN_LINK: {
-      entry: assign({ stateName: "CROSS_DOMAIN_LINK" }),
-      on: {
-        // Accumulate cross-domain links and stay in state
-        CROSS_DOMAIN_LINKED: {
-          target: "CROSS_DOMAIN_LINK",
-          actions: "markCrossDomainLinked",
+      states: {
+        EDGE_CASE_QUESTION: {
+          entry: assign({ stateName: "EDGE_CASE_QUESTION" }),
+          after: {
+            [PHASE_BUDGETS_MS.domain_knowledge[3]]: "DEPTH_SCORING",
+          },
+          on: {
+            CANDIDATE_RESPONSE: "MISCONCEPTION_RESOLUTION",
+            TIMEOUT:            "DEPTH_SCORING",
+          },
         },
-        PHASE_COMPLETE: "D2_PACING",
-      },
-    },
 
-    D2_PACING: {
-      entry: assign({ stateName: "D2_PACING" }),
-      on: {
-        D2_REDIRECT_NEEDED: "D2_REDIRECT",
-        PHASE_COMPLETE: "D2_FLOWING_CONVO",
-        TIMEOUT: "D2_SCORING",
-      },
-    },
-
-    D2_REDIRECT: {
-      entry: [
-        "issueD2Redirect",
-        assign({ stateName: "D2_REDIRECT" }),
-      ],
-      on: {
-        PHASE_COMPLETE: "D2_FLOWING_CONVO", // Resume D2 after redirect
-      },
-    },
-
-    D2_SCORING: {
-      entry: assign({ stateName: "D2_SCORING" }),
-      on: {
-        D2_SCORED: {
-          target: "STRETCH_FRAMING",
-          actions: "setD2Score",
+        // Deferred misconceptions from Phase 1 are confronted here
+        // so the interviewer can address them with transcript context.
+        MISCONCEPTION_RESOLUTION: {
+          entry: assign({ stateName: "MISCONCEPTION_RESOLUTION" }),
+          on: { PHASE_COMPLETE: "IDK_HANDLING" },
         },
-      },
-    },
 
-    // ──────────────────────────────────────────────────────────
-    // PHASE 5 — Domain 3 (stretch probe, 0.5x weight)
-    // ──────────────────────────────────────────────────────────
-    STRETCH_FRAMING: {
-      entry: assign({ stateName: "STRETCH_FRAMING", phase: 5 }),
-      on: { CANDIDATE_RESPONSE: "FIRST_PRINCIPLES_TEST" },
-    },
-
-    FIRST_PRINCIPLES_TEST: {
-      entry: assign({ stateName: "FIRST_PRINCIPLES_TEST" }),
-      on: { CANDIDATE_RESPONSE: "LEARNING_VELOCITY" },
-    },
-
-    LEARNING_VELOCITY: {
-      entry: assign({ stateName: "LEARNING_VELOCITY" }),
-      after: {
-        [PHASE_BUDGETS_MS.domain_knowledge[5]]: "STRETCH_SCORING",
-      },
-      on: {
-        CANDIDATE_RESPONSE: "STRETCH_SCORING",
-        TIMEOUT: "STRETCH_SCORING",
-      },
-    },
-
-    STRETCH_SCORING: {
-      entry: assign({ stateName: "STRETCH_SCORING" }),
-      on: {
-        STRETCH_SCORED: {
-          target: "DELIBERATE_CHALLENGE",
-          actions: "setStretchScore",
+        IDK_HANDLING: {
+          entry: assign({ stateName: "IDK_HANDLING" }),
+          on: {
+            IDK_HANDLED: {
+              target:  "ADJACENT_DOMAIN_TEST",
+              actions: "markIdkHandled",
+            },
+            PHASE_COMPLETE: "ADJACENT_DOMAIN_TEST",
+          },
         },
-      },
-    },
 
-    // ──────────────────────────────────────────────────────────
-    // PHASE 6 — Correction acceptance test
-    // ──────────────────────────────────────────────────────────
-    DELIBERATE_CHALLENGE: {
-      entry: assign({ stateName: "DELIBERATE_CHALLENGE", phase: 6 }),
-      after: {
-        [PHASE_BUDGETS_MS.domain_knowledge[6]]: "COACHABILITY_SCORING",
-      },
-      on: {
-        CANDIDATE_RESPONSE: "RESPONSE_CLASSIFY",
-        TIMEOUT: "COACHABILITY_SCORING",
-      },
-    },
-
-    RESPONSE_CLASSIFY: {
-      entry: assign({ stateName: "RESPONSE_CLASSIFY" }),
-      on: {
-        // Full arc evaluation, not binary pass/fail
-        PHASE_COMPLETE: "REASONING_DEPTH_EVAL",
-      },
-    },
-
-    REASONING_DEPTH_EVAL: {
-      entry: assign({ stateName: "REASONING_DEPTH_EVAL" }),
-      on: {
-        PHASE_COMPLETE: "COACHABILITY_SCORING",
-      },
-    },
-
-    COACHABILITY_SCORING: {
-      entry: assign({ stateName: "COACHABILITY_SCORING" }),
-      on: {
-        COACHABILITY_SCORED: {
-          target: "DOMAIN_SCORE_CALC",
-          actions: "setCoachabilityScore",
-        },
-      },
-    },
-
-    // ──────────────────────────────────────────────────────────
-    // PHASE 7 — Scoring & knowledge depth report
-    // ──────────────────────────────────────────────────────────
-    DOMAIN_SCORE_CALC: {
-      entry: assign({ stateName: "DOMAIN_SCORE_CALC", phase: 7 }),
-      on: {
-        SCORE_COMPUTED: {
-          target: "CLAIM_VALIDATION_MAP",
-          actions: [
-            "setDimensionScores",
-            "applyCoachabilityMultiplier", // Multiplier applied after base scores are set
+        ADJACENT_DOMAIN_TEST: {
+          entry: [
+            "markAdjacentDomainTested",
+            assign({ stateName: "ADJACENT_DOMAIN_TEST" }),
           ],
+          on: {
+            CANDIDATE_RESPONSE: "DEPTH_SCORING",
+            ADJACENT_DOMAIN_TESTED: "DEPTH_SCORING",
+          },
+        },
+
+        DEPTH_SCORING: {
+          entry: assign({ stateName: "DEPTH_SCORING" }),
+          on: {
+            DEPTH_SCORED: {
+              target:  "#domain-knowledge.PHASE_4_DOMAIN2",
+              actions: "setDepthScore",
+            },
+          },
         },
       },
     },
 
-    CLAIM_VALIDATION_MAP: {
-      entry: assign({ stateName: "CLAIM_VALIDATION_MAP" }),
-      on: { PHASE_COMPLETE: "DEPTH_PROFILE_GEN" },
-    },
+    // ══════════════════════════════════════════════════════════════
+    // COMPOUND STATE: PHASE_4_DOMAIN2
+    //
+    // Domain 2 — Compressed conversational probe.
+    // Uses d2ExchangeCount (not totalExchanges) to gate exit so
+    // Phase 1–3 activity does not artificially truncate D2.
+    //
+    // D2_PACING now uses the guard d2ExchangeLimitReached defined in
+    // setup() which checks both d2ExchangeCount and d2RedirectIssued.
+    // ══════════════════════════════════════════════════════════════
+    PHASE_4_DOMAIN2: {
+      initial: "D2_FLOWING_CONVO",
+      entry:   assign({ phase: 4, stateName: "D2_FLOWING_CONVO" }),
 
-    DEPTH_PROFILE_GEN: {
-      entry: assign({ stateName: "DEPTH_PROFILE_GEN" }),
-      on: { PHASE_COMPLETE: "HIRE_SIGNAL_CALC" },
-    },
-
-    HIRE_SIGNAL_CALC: {
-      entry: [
-        "computeHireSignal",
-        assign({ stateName: "HIRE_SIGNAL_CALC" }),
-      ],
-      on: {
-        // Load prior scores for cross-round meta synthesis
-        PRIOR_SCORES_LOADED: {
-          target: "CROSS_ROUND_META_SCORE",
-          actions: "setPriorScores",
+      states: {
+        D2_FLOWING_CONVO: {
+          entry: assign({ stateName: "D2_FLOWING_CONVO" }),
+          after: {
+            [PHASE_BUDGETS_MS.domain_knowledge[4]]: "D2_SCORING",
+          },
+          on: {
+            CANDIDATE_RESPONSE:  "CROSS_DOMAIN_LINK",
+            D2_REDIRECT_NEEDED:  "D2_REDIRECT",
+            TIMEOUT:             "D2_SCORING",
+          },
         },
-        PHASE_COMPLETE: "REPORT_BUILDING", // No prior scores available — skip meta
+
+        CROSS_DOMAIN_LINK: {
+          entry: assign({ stateName: "CROSS_DOMAIN_LINK" }),
+          on: {
+            CROSS_DOMAIN_LINKED: {
+              target:  "CROSS_DOMAIN_LINK",
+              actions: "markCrossDomainLinked",
+            },
+            PHASE_COMPLETE: "D2_PACING",
+          },
+        },
+
+        D2_PACING: {
+          entry: assign({ stateName: "D2_PACING" }),
+          on: {
+            D2_REDIRECT_NEEDED: "D2_REDIRECT",
+            // Guard evaluated by the machine; controller sends TIMEOUT or PHASE_COMPLETE.
+            TIMEOUT:     "D2_SCORING",
+            PHASE_COMPLETE: "D2_FLOWING_CONVO",
+          },
+        },
+
+        D2_REDIRECT: {
+          entry: [
+            "issueD2Redirect",
+            assign({ stateName: "D2_REDIRECT" }),
+          ],
+          on: {
+            // Resume D2 after redirect.
+            PHASE_COMPLETE: "D2_FLOWING_CONVO",
+          },
+        },
+
+        D2_SCORING: {
+          entry: assign({ stateName: "D2_SCORING" }),
+          on: {
+            D2_SCORED: {
+              target:  "#domain-knowledge.PHASE_5_STRETCH",
+              actions: "setD2Score",
+            },
+          },
+        },
       },
     },
 
-    // Cross-round meta: computed only when all 3 interview types are done
-    CROSS_ROUND_META_SCORE: {
-      entry: [
-        "computeCrossRoundMeta",
-        assign({ stateName: "CROSS_ROUND_META_SCORE" }),
-      ],
-      always: "REPORT_BUILDING",
-    },
+    // ══════════════════════════════════════════════════════════════
+    // COMPOUND STATE: PHASE_5_STRETCH
+    //
+    // Domain 3 — Stretch probe (0.5× weight).
+    // Tests first-principles reasoning and learning velocity on an
+    // unfamiliar domain.  Scored at 0.5× weight — the intent is to
+    // reward intellectual curiosity without penalising gaps.
+    // ══════════════════════════════════════════════════════════════
+    PHASE_5_STRETCH: {
+      initial: "STRETCH_FRAMING",
+      entry:   assign({ phase: 5, stateName: "STRETCH_FRAMING" }),
 
-    // Named REPORT_BUILDING (not REPORT_GENERATED) to avoid collision with
-    // the REPORT_READY event type.
-    REPORT_BUILDING: {
-      entry: assign({ stateName: "REPORT_BUILDING" }),
-      on: {
-        REPORT_READY: {
-          target: "TERMINAL_COMPLETED",
-          actions: "setReport",
+      states: {
+        STRETCH_FRAMING: {
+          entry: assign({ stateName: "STRETCH_FRAMING" }),
+          on: { CANDIDATE_RESPONSE: "FIRST_PRINCIPLES_TEST" },
+        },
+
+        FIRST_PRINCIPLES_TEST: {
+          entry: assign({ stateName: "FIRST_PRINCIPLES_TEST" }),
+          on: { CANDIDATE_RESPONSE: "LEARNING_VELOCITY" },
+        },
+
+        LEARNING_VELOCITY: {
+          entry: assign({ stateName: "LEARNING_VELOCITY" }),
+          after: {
+            [PHASE_BUDGETS_MS.domain_knowledge[5]]: "STRETCH_SCORING",
+          },
+          on: {
+            CANDIDATE_RESPONSE: "STRETCH_SCORING",
+            TIMEOUT:            "STRETCH_SCORING",
+          },
+        },
+
+        STRETCH_SCORING: {
+          entry: assign({ stateName: "STRETCH_SCORING" }),
+          on: {
+            STRETCH_SCORED: {
+              target:  "#domain-knowledge.PHASE_6_COACHABILITY",
+              actions: "setStretchScore",
+            },
+          },
         },
       },
     },
+
+    // ══════════════════════════════════════════════════════════════
+    // COMPOUND STATE: PHASE_6_COACHABILITY
+    //
+    // Correction acceptance test.
+    // The interviewer issues a deliberate challenge (incorrect or
+    // partially incorrect statement) and observes whether the
+    // candidate pushes back with evidence, capitulates, or deflects.
+    // The coachabilityScore is applied as a multiplier on the overall
+    // score, not additively.
+    // ══════════════════════════════════════════════════════════════
+    PHASE_6_COACHABILITY: {
+      initial: "DELIBERATE_CHALLENGE",
+      entry:   assign({ phase: 6, stateName: "DELIBERATE_CHALLENGE" }),
+
+      states: {
+        DELIBERATE_CHALLENGE: {
+          entry: assign({ stateName: "DELIBERATE_CHALLENGE" }),
+          after: {
+            [PHASE_BUDGETS_MS.domain_knowledge[6]]: "COACHABILITY_SCORING",
+          },
+          on: {
+            CANDIDATE_RESPONSE: "RESPONSE_CLASSIFY",
+            TIMEOUT:            "COACHABILITY_SCORING",
+          },
+        },
+
+        // Full arc evaluation — not a binary pass/fail.
+        RESPONSE_CLASSIFY: {
+          entry: assign({ stateName: "RESPONSE_CLASSIFY" }),
+          on: {
+            PHASE_COMPLETE: "REASONING_DEPTH_EVAL",
+          },
+        },
+
+        REASONING_DEPTH_EVAL: {
+          entry: assign({ stateName: "REASONING_DEPTH_EVAL" }),
+          on: {
+            PHASE_COMPLETE: "COACHABILITY_SCORING",
+          },
+        },
+
+        COACHABILITY_SCORING: {
+          entry: assign({ stateName: "COACHABILITY_SCORING" }),
+          on: {
+            COACHABILITY_SCORED: {
+              target:  "#domain-knowledge.PHASE_7_SCORING",
+              actions: "setCoachabilityScore",
+            },
+          },
+        },
+      },
+    },
+
+    // ══════════════════════════════════════════════════════════════
+    // COMPOUND STATE: PHASE_7_SCORING
+    //
+    // Final scoring & knowledge depth report.
+    // Linear pipeline: dimension scoring → claim map → depth profile
+    // → hire signal → (optional) cross-round meta → report.
+    // ══════════════════════════════════════════════════════════════
+    PHASE_7_SCORING: {
+      initial: "DOMAIN_SCORE_CALC",
+      entry:   assign({ phase: 7, stateName: "DOMAIN_SCORE_CALC" }),
+
+      states: {
+        DOMAIN_SCORE_CALC: {
+          entry: assign({ stateName: "DOMAIN_SCORE_CALC" }),
+          on: {
+            SCORE_COMPUTED: {
+              target:  "CLAIM_VALIDATION_MAP",
+              actions: [
+                "setDimensionScores",
+                // Coachability multiplier is applied after base scores are set
+                // so the multiplication uses the final computed overall score.
+                "applyCoachabilityMultiplier",
+              ],
+            },
+          },
+        },
+
+        CLAIM_VALIDATION_MAP: {
+          entry: assign({ stateName: "CLAIM_VALIDATION_MAP" }),
+          on: { PHASE_COMPLETE: "DEPTH_PROFILE_GEN" },
+        },
+
+        DEPTH_PROFILE_GEN: {
+          entry: assign({ stateName: "DEPTH_PROFILE_GEN" }),
+          on: { PHASE_COMPLETE: "HIRE_SIGNAL_CALC" },
+        },
+
+        HIRE_SIGNAL_CALC: {
+          entry: [
+            "computeHireSignal",
+            assign({ stateName: "HIRE_SIGNAL_CALC" }),
+          ],
+          on: {
+            // Prior scores available — compute cross-round meta.
+            PRIOR_SCORES_LOADED: {
+              target:  "CROSS_ROUND_META_SCORE",
+              actions: "setPriorScores",
+            },
+            // No prior scores — skip meta and go straight to report.
+            PHASE_COMPLETE: "REPORT_BUILDING",
+          },
+        },
+
+        // Computed only when all 3 interview types have scores available.
+        CROSS_ROUND_META_SCORE: {
+          entry: [
+            "computeCrossRoundMeta",
+            assign({ stateName: "CROSS_ROUND_META_SCORE" }),
+          ],
+          always: "REPORT_BUILDING",
+        },
+
+        // Named REPORT_BUILDING (not REPORT_GENERATED) to avoid name collision
+        // with the REPORT_READY event type.
+        REPORT_BUILDING: {
+          entry: assign({ stateName: "REPORT_BUILDING" }),
+          on: {
+            REPORT_READY: {
+              target:  "#domain-knowledge.TERMINAL_COMPLETED",
+              actions: "setReport",
+            },
+          },
+        },
+      },
+    },
+
+    // ══════════════════════════════════════════════════════════════
+    // TERMINAL STATES
+    // ══════════════════════════════════════════════════════════════
 
     TERMINAL_COMPLETED: {
-      type: "final" as const,
+      type:  "final" as const,
       entry: assign({ stateName: "TERMINAL_COMPLETED" }),
     },
 
+    // ERROR_STATE is reached via the root-level `on: ERROR` transition
+    // declared above so any compound state can escape to it without
+    // needing a per-state handler.
     ERROR_STATE: {
-      type: "final" as const,
+      type:  "final" as const,
       entry: assign({ stateName: "ERROR_STATE" }),
     },
   },
 });
 
 export type DomainKnowledgeMachine = typeof domainKnowledgeMachine;
-export type DomainKnowledgeActor = ActorRefFrom<DomainKnowledgeMachine>;
+export type DomainKnowledgeActor   = ActorRefFrom<DomainKnowledgeMachine>;
