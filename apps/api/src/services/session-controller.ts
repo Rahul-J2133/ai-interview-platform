@@ -90,6 +90,7 @@ import {
   classifyProductionDepth,
   scoreCoachability,
 } from "@interview/ai-engine";
+import type { EvaluationSignals } from "@interview/ai-engine";
 import { logger, smLogger } from "../lib/logger";
 
 // ============================================================
@@ -657,12 +658,9 @@ export class InterviewSessionController {
 
         const openingStartMs = Date.now();
 
-        // Fold planContextMode and resumeEvidence into the planContext string
-        // so the AI has full signal without requiring InterviewerContext to be
-        // extended.  When ai-engine adds those typed fields, promote them back.
-        const enrichedPlanContext = InterviewSessionController.enrichPlanContext(
-          planContext, openingCtx
-        );
+        // Use buildEvaluationSignals to pass typed signals instead of
+        // string-concatenating them into planContext.
+        const evaluationSignals = InterviewSessionController.buildEvaluationSignals(openingCtx);
 
         const openingQuestion = await generateInterviewerResponse({
           interviewType:     input.type,
@@ -671,9 +669,10 @@ export class InterviewSessionController {
           currentPhase:      openingCtx.phase,
           currentState:      finalStateName,
           transcript:        [], // empty — this is the very first turn
-          planContext:       enrichedPlanContext,
+          planContext,
           activeProbeIndex:  0,
           followUpIntensity: "medium",
+          evaluationSignals,
         });
 
         logger.info(
@@ -1085,12 +1084,10 @@ export class InterviewSessionController {
 
       const aiStartMs = Date.now();
 
-      // enrichPlanContext appends planContextMode and per-domain resumeEvidence
-      // to the planContext string so the AI has full signal without requiring
-      // InterviewerContext to carry new typed fields.
-      const enrichedPlanContext = InterviewSessionController.enrichPlanContext(
-        planContext, newCtx
-      );
+      // buildEvaluationSignals extracts live scores from XState context and
+      // passes them as a typed field to generateInterviewerResponse so the AI
+      // has full signal for adaptive follow-ups without string serialization.
+      const evaluationSignals = InterviewSessionController.buildEvaluationSignals(newCtx);
 
       interviewerResponse = await generateInterviewerResponse(
         {
@@ -1102,9 +1099,10 @@ export class InterviewSessionController {
           // Full transcript is passed so the AI can reference specific answers
           // and build genuinely transcript-grounded follow-ups.
           transcript:        transcript.map((t) => ({ role: t.role, content: t.content })),
-          planContext:       enrichedPlanContext,
+          planContext,
           activeProbeIndex:  newCtx.activeProbeIndex ?? 0,
           followUpIntensity: (newCtx as BehavioralMachineContext).followUpIntensity ?? "medium",
+          evaluationSignals,
         },
         onChunk
       );
@@ -2605,61 +2603,112 @@ export class InterviewSessionController {
   }
 
   /**
-   * Build a resume evidence map for the active domain.
+   * buildEvaluationSignals
    *
-   * This is passed to generateInterviewerResponse so the AI can tie
-   * follow-up probes back to specific resume claims rather than asking
-   * generic questions.  For non-domain-knowledge interviews the map is
-   * always empty (the transcript already carries all relevant context).
+   * Extracts all live evaluation signals from the XState context and returns
+   * them as a typed EvaluationSignals object.  This is passed directly to
+   * generateInterviewerResponse so the LLM has full signal to adapt its
+   * questioning strategy without any string serialization.
    *
-   * Shape: { [domainName: string]: string[] } — each value is an array
-   * of resume bullet-points or sentences that mention that domain.
+   * The extraction is intentionally defensive (optional chaining + nullish
+   * coalescing everywhere) because this method is called at every turn, including
+   * the opening question where most slices are at their zero-value defaults.
    */
-  private static buildResumeEvidence(ctx: AnyContext): Record<string, string[]> {
+  private static buildEvaluationSignals(ctx: AnyContext): EvaluationSignals {
+    // ── Domain knowledge signals ────────────────────────────────────────────
     const dCtx = ctx as DomainKnowledgeMachineContext;
-    if (!Array.isArray(dCtx.domainPlan) || dCtx.domainPlan.length === 0) return {};
-
-    const evidence: Record<string, string[]> = {};
-    for (const item of dCtx.domainPlan) {
-      // DomainPlan.resumeEvidence is an optional string[] added by the adaptive
-      // planner in generateDomainPlan.  Fall back to an empty array if the
-      // planner ran in exploratory mode and couldn't map resume lines.
-      evidence[item.domain] = (item as DomainPlan & { resumeEvidence?: string[] }).resumeEvidence ?? [];
+    if (Array.isArray(dCtx.domainPlan) && dCtx.domainPlan.length > 0) {
+      return {
+        // Phase 1
+        conceptualScore:         dCtx.phase1?.conceptualScore            ?? null,
+        misconceptionsDetected:  dCtx.phase1?.misconceptionsDetected      ?? [],
+        overconfidenceFlag:      dCtx.phase1?.overconfidenceFlag          ?? false,
+        underconfidenceFlag:     dCtx.phase1?.underconfidenceFlag         ?? false,
+        // Phase 2
+        productionDepthScore:    dCtx.phase2?.productionDepthScore        ?? null,
+        inflationFlag:           dCtx.phase2?.inflationFlag               ?? false,
+        // Phase 3
+        depthScore:              dCtx.phase3?.depthScore                  ?? null,
+        idkHandled:              dCtx.phase3?.idkHandled                  ?? false,
+        adjacentDomainTested:    dCtx.phase3?.adjacentDomainTested        ?? false,
+        // Phase 4
+        crossDomainLinked:       dCtx.phase4?.crossDomainLinked           ?? false,
+        d2ExchangeCount:         dCtx.phase4?.d2ExchangeCount             ?? 0,
+        // Phase 5
+        firstPrinciplesScore:    dCtx.phase5?.firstPrinciplesScore        ?? null,
+        learningApproachScore:   dCtx.phase5?.learningApproachScore       ?? null,
+        // Phase 6
+        coachabilityScore:       dCtx.phase6?.coachabilityScore           ?? null,
+        // Overall
+        overallScore:            dCtx.overallScore                        ?? null,
+        dimensionScores:         dCtx.dimensionScores                     ?? [],
+        // Meta
+        totalExchanges:          dCtx.totalExchanges                      ?? 0,
+        probeCount:              dCtx.probeCount                          ?? 0,
+        redirectCount:           dCtx.redirectCount                       ?? 0,
+        silenceEvents:           dCtx.silenceEvents                       ?? 0,
+        currentDomain:           dCtx.currentDomain                       ?? 0,
+        totalDomains:            dCtx.domainPlan.length,
+      };
     }
-    return evidence;
-  }
 
-  /**
-   * Enriches the planContext string with planContextMode and per-domain
-   * resumeEvidence so the AI interviewer has full signal for adaptive
-   * follow-ups without requiring InterviewerContext to be extended.
-   *
-   * When @interview/ai-engine adds typed planContextMode / resumeEvidence
-   * fields to InterviewerContext, callers can drop this helper and pass the
-   * fields directly.
-   */
-  private static enrichPlanContext(planContext: string, ctx: AnyContext): string {
-    const dCtx = ctx as DomainKnowledgeMachineContext;
-    if (!Array.isArray(dCtx.domainPlan) || dCtx.domainPlan.length === 0) {
-      return planContext;
-    }
+    // // ── Behavioral signals ──────────────────────────────────────────────────
+    // const bCtx = ctx as BehavioralMachineContext;
+    // if (Array.isArray(bCtx.competencyPlan) && bCtx.competencyPlan.length > 0) {
+    //   return {
+    //     storyExistenceConfirmed:  bCtx.storyExistenceConfirmed ?? false,
+    //     starComponents:           bCtx.starPartial
+    //       ? {
+    //           situation: bCtx.starPartial.situation ?? 0,
+    //           task:      bCtx.starPartial.task      ?? 0,
+    //           action:    bCtx.starPartial.action    ?? 0,
+    //           result:    bCtx.starPartial.result    ?? 0,
+    //           learning:  bCtx.starPartial.learning,
+    //         }
+    //       : undefined,
+    //     attributionRatio:         bCtx.iWeRatioRaw               ?? undefined,
+    //     overconfidenceFlag:       false,  // not tracked in behavioral context
+    //     underconfidenceFlag:      false,
+    //     adversityScore: bCtx.adversityScore
+    //       ? {
+    //           accountability: bCtx.adversityScore.accountability,
+    //           recoveryArc:    bCtx.adversityScore.recoveryArc,
+    //           noBlame:        bCtx.adversityScore.noBlame,
+    //           learningQuality: bCtx.adversityScore.learningQuality,
+    //         }
+    //       : undefined,
+    //     overallScore:             bCtx.overallScore               ?? null,
+    //     dimensionScores:          bCtx.dimensionScores            ?? [],
+    //     totalExchanges:           bCtx.totalExchanges             ?? 0,
+    //     probeCount:               bCtx.probeCount                 ?? 0,
+    //     redirectCount:            bCtx.redirectCount              ?? 0,
+    //     silenceEvents:            bCtx.silenceEvents              ?? 0,
+    //     currentCompetencyIndex:   bCtx.currentCompetencyIndex     ?? 0,
+    //     totalCompetencies:        bCtx.competencyPlan.length,
+    //   };
+    // }
 
-    const mode     = dCtx.planContextMode ?? "exploratory";
-    const evidence = InterviewSessionController.buildResumeEvidence(ctx);
-    const evidenceLines = Object.entries(evidence)
-      .filter(([, bullets]) => bullets.length > 0)
-      .map(([domain, bullets]) =>
-        `Resume evidence — ${domain}:\n${bullets.map((b) => `  • ${b}`).join("\n")}`
-      )
-      .join("\n");
+    // // ── System design signals ───────────────────────────────────────────────
+    // const sdCtx = ctx as SystemDesignMachineContext;
+    // if (sdCtx.interviewObject) {
+    //   return {
+    //     coverageScore:    sdCtx.coverageScore    ?? null,
+    //     estimationScore:  sdCtx.estimationScore  ?? null,
+    //     tradeoffScore:    sdCtx.tradeoffScore    ?? null,
+    //     overallScore:     sdCtx.overallScore     ?? null,
+    //     dimensionScores:  sdCtx.dimensionScores  ?? [],
+    //     totalExchanges:   sdCtx.totalExchanges   ?? 0,
+    //     probeCount:       sdCtx.probeCount       ?? 0,
+    //     redirectCount:    sdCtx.redirectCount    ?? 0,
+    //     silenceEvents:    sdCtx.silenceEvents    ?? 0,
+    //   };
+    // }
 
-    return [
-      planContext,
-      `Plan context mode: ${mode}`,
-      evidenceLines,
-    ]
-      .filter(Boolean)
-      .join("\n");
+    // ── Fallback (pre-session or unknown type) ──────────────────────────────
+    return {
+      totalExchanges: ctx.totalExchanges ?? 0,
+      probeCount:     ctx.probeCount     ?? 0,
+    };
   }
 
   private static classifyMsgType(stateName: string): MessageType {
