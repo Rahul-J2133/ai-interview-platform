@@ -10,7 +10,7 @@
  *   is not yet set at module evaluation time.
  */
 
-import "../lib/env"; // FIRST — loads dotenv before any package initialises
+// import "../lib/env"; // FIRST — loads dotenv before any package initialises
 
 import Groq from "groq-sdk";
 import { z } from "zod";
