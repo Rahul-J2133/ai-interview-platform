@@ -37,12 +37,15 @@ app.use("*", async (c, next) => {
 });
 
 app.use("*", honoLogger());
-app.use("*", cors({
-  origin: [env.WEB_URL, "http://localhost:3000", "http://localhost:3001"],
-  credentials: true,
-  allowMethods: ["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
-  allowHeaders: ["Content-Type", "Authorization"],
-}));
+app.use(
+  "*",
+  cors({
+    origin: [env.WEB_URL, "http://localhost:3000", "http://localhost:3001"],
+    credentials: true,
+    allowMethods: ["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
+    allowHeaders: ["Content-Type", "Authorization"],
+  }),
+);
 
 app.get("/health", (c) =>
   c.json({
@@ -55,7 +58,7 @@ app.get("/health", (c) =>
       hasClerk: !!process.env.CLERK_WEBHOOK_SECRET,
       node: process.version,
     },
-  })
+  }),
 );
 
 // Webhooks — no auth middleware (Clerk verifies via svix signature)
@@ -67,13 +70,16 @@ app.route("/api/v1/sessions", sessionsRouter);
 app.route("/api/v1/documents", documentsRouter);
 
 app.notFound((c) =>
-  c.json({ error: { code: "NOT_FOUND", message: "Route not found" } }, 404)
+  c.json({ error: { code: "NOT_FOUND", message: "Route not found" } }, 404),
 );
 
 app.onError((err, c) => {
   Sentry.captureException(err);
   logger.error({ err }, "Unhandled error");
-  return c.json({ error: { code: "INTERNAL_ERROR", message: "Internal server error" } }, 500);
+  return c.json(
+    { error: { code: "INTERNAL_ERROR", message: "Internal server error" } },
+    500,
+  );
 });
 
 // ── HTTP SERVER ───────────────────────────────────────────
@@ -92,7 +98,13 @@ httpServer.listen(wsPort, () => {
   logger.info({ port: wsPort }, "WebSocket server listening");
 });
 
-process.on("SIGTERM", () => { logger.info("SIGTERM — shutting down"); process.exit(0); });
-process.on("SIGINT",  () => { logger.info("SIGINT — shutting down"); process.exit(0); });
+process.on("SIGTERM", () => {
+  logger.info("SIGTERM — shutting down");
+  process.exit(0);
+});
+process.on("SIGINT", () => {
+  logger.info("SIGINT — shutting down");
+  process.exit(0);
+});
 
 export default app;

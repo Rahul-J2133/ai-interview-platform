@@ -50,20 +50,20 @@ function getGroq(): Groq {
  * llama-3.3-70b-versatile  — best available for complex reasoning
  * llama-3.1-8b-instant      — fast, cheap for simple classification tasks
  */
-// const MODELS = {
-//   planner: "qwen/qwen3-32b",
-//   interviewer: "qwen/qwen3-32b",
-//   evaluator: "qwen/qwen3-32b",
-//   scorer: "qwen/qwen3-32b",
-//   classifier: "qwen/qwen3-32b", // fast path for single-token decisions
-// } as const;
 const MODELS = {
-  planner: "llama-3.3-70b-versatile",
-  interviewer: "llama-3.3-70b-versatile",
-  evaluator: "llama-3.3-70b-versatile",
-  scorer: "llama-3.3-70b-versatile",
+  planner: "llama-3.1-8b-instant",
+  interviewer: "llama-3.1-8b-instant",
+  evaluator: "llama-3.1-8b-instant",
+  scorer: "llama-3.1-8b-instant",
   classifier: "llama-3.1-8b-instant", // fast path for single-token decisions
 } as const;
+// const MODELS = {
+//   planner: "llama-3.3-70b-versatile",
+//   interviewer: "llama-3.3-70b-versatile",
+//   evaluator: "llama-3.3-70b-versatile",
+//   scorer: "llama-3.3-70b-versatile",
+//   classifier: "llama-3.1-8b-instant", // fast path for single-token decisions
+// } as const;
 
 type ModelRole = keyof typeof MODELS;
 
