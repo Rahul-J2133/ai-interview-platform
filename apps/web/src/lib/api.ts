@@ -168,6 +168,59 @@ export async function abandonSession(token: string, id: string) {
   });
 }
 
+// ── SSE STREAM AUTH ───────────────────────────────────────
+//
+// The hardened API no longer accepts a JWT in the SSE query string.
+// Instead:
+//   1. Call getStreamToken() with a valid JWT to obtain a short-lived nonce.
+//   2. Open the SSE stream using that nonce via getStreamUrl().
+//
+// The nonce is single-use and expires in 30 seconds.
+
+export async function getStreamToken(
+  token: string,
+  sessionId: string
+): Promise<ApiResult<{ nonce: string; expiresIn: number }>> {
+  return req<{ nonce: string; expiresIn: number }>(
+    `/api/v1/sessions/${sessionId}/stream-token`,
+    token,
+    { method: "POST" }
+  );
+}
+
+/** Build the SSE stream URL from a nonce (never includes the JWT). */
+export function getStreamUrl(sessionId: string, nonce: string): string {
+  return `${BASE}/api/v1/sessions/${sessionId}/stream?nonce=${encodeURIComponent(nonce)}`;
+}
+
+// ── SSE MESSAGING ─────────────────────────────────────────
+//
+// Candidate messages and silence events are sent as separate HTTP
+// POST requests rather than through the SSE connection itself.
+
+export async function sendCandidateMessage(
+  token: string,
+  sessionId: string,
+  content: string
+): Promise<ApiResult<{ queued: boolean }>> {
+  return req<{ queued: boolean }>(
+    `/api/v1/sessions/${sessionId}/message`,
+    token,
+    { method: "POST", body: JSON.stringify({ content }) }
+  );
+}
+
+export async function sendSilenceEvent(
+  token: string,
+  sessionId: string
+): Promise<ApiResult<{ queued: boolean }>> {
+  return req<{ queued: boolean }>(
+    `/api/v1/sessions/${sessionId}/silence`,
+    token,
+    { method: "POST" }
+  );
+}
+
 // ── DOCUMENTS ────────────────────────────────────────────
 
 export async function parseDocument(

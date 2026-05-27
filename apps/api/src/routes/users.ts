@@ -1,9 +1,9 @@
-// apps\api\src\routes\users.ts
+// src/routes/users.ts
 
 import "../lib/env";
 
 import { Hono } from "hono";
-import { db, users, userInterviewAggregates } from "@interview/db";
+import { db, users, userInterviewAggregates } from "../db/index.js";
 import { eq } from "drizzle-orm";
 import { clerkAuthMiddleware } from "../middleware/auth";
 
@@ -19,7 +19,10 @@ usersRouter.get("/me", async (c) => {
   });
 
   if (!user) {
-    return c.json({ data: null, error: { code: "NOT_FOUND", message: "User not found" } }, 404);
+    return c.json(
+      { data: null, error: { code: "NOT_FOUND", message: "User not found" } },
+      404
+    );
   }
 
   const aggregate = await db.query.userInterviewAggregates.findFirst({

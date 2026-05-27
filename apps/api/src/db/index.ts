@@ -1,11 +1,27 @@
 /**
- * packages/db/src/index.ts
+ * src/db/index.ts — production hardened
  *
- * Lazy DB client — the Postgres connection is created on FIRST
- * property access of `db`, not at module import time.
+ * Changes from original:
  *
- * This means DATABASE_URL can be loaded by the app's dotenv call
- * in apps/api/src/lib/env.ts before any DB operation is attempted.
+ * [HIGH-7] No connection pool ceiling relative to DB server limits
+ *   - max reduced from 20 → 5 (configure via DB_POOL_MAX env var)
+ *   - max_lifetime added (recycle connections every 5 min to
+ *     prevent stale TCP connections from being reused silently)
+ *   - idle_timeout reduced to 20s
+ *
+ * The recommended value for max is:
+ *   Math.floor(db_max_connections / num_processes) - safety_margin
+ *
+ * For a Neon/RDS free-tier DB (25 max connections) with 2 processes:
+ *   Math.floor(25 / 2) - 2 = 10   ← set DB_POOL_MAX=10
+ *
+ * For a Neon/RDS standard (100 max connections) with 4 processes:
+ *   Math.floor(100 / 4) - 5 = 20  ← set DB_POOL_MAX=20
+ *
+ * Default is 5, which is safe for a single process against any tier.
+ *
+ * For high-concurrency deployments, put PgBouncer in front of Postgres
+ * and set max to a higher value — the pooler handles fan-in.
  */
 
 import postgres from "postgres";
@@ -23,16 +39,22 @@ function buildDb(): PostgresJsDatabase<typeof schema> {
   if (!url) {
     throw new Error(
       "DATABASE_URL is not set.\n" +
-      "Ensure apps/api/.env exists and is loaded before the first DB call.\n" +
-      "Copy apps/api/.env.example → apps/api/.env and fill in your Postgres URL."
+        "Ensure .env exists and is loaded before the first DB call.\n" +
+        "Copy .env.example → .env and fill in your Postgres URL."
     );
   }
 
+  // Pool size: configurable via DB_POOL_MAX, default 5.
+  // Set this to floor(db_max_connections / num_processes) - margin.
+  const maxConnections = parseInt(process.env.DB_POOL_MAX ?? "5", 10);
+
   const client = postgres(url, {
-    max: 20,
-    idle_timeout: 30,
+    max: maxConnections,
+    idle_timeout: 20,          // release idle connections after 20s
     connect_timeout: 10,
+    max_lifetime: 300,         // recycle connections every 5 min
     ssl: process.env.NODE_ENV === "production" ? { rejectUnauthorized: true } : false,
+    onnotice: () => {},        // suppress pg NOTICE logs in tests
   });
 
   return drizzle(client, {

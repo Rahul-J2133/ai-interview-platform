@@ -2825,6 +2825,36 @@ export class InterviewSessionController {
 
   // ─── PUBLIC API ────────────────────────────────────────────
 
+
+  /**
+   * Forcibly terminate an in-memory session actor.
+   *
+   * Called by the abandon route to stop the XState actor, release the
+   * processing lock, and free memory. Previously, abandoning a session
+   * only updated the DB row — the actor kept running indefinitely.
+   *
+   * Safe to call even if no actor is registered (no-op).
+   */
+  static terminate(sessionId: string): void {
+    const actor = actorRegistry.get(sessionId);
+    if (actor) {
+      try {
+        actor.stop();
+      } catch {
+        // Actor may already be stopped
+      }
+    }
+    actorRegistry.delete(sessionId);
+    transcriptRegistry.delete(sessionId);
+    typeRegistry.delete(sessionId);
+    openingMessageRegistry.delete(sessionId);
+
+    logger.info(
+      { event: "session.terminate", sessionId },
+      "Session actor forcibly terminated"
+    );
+  }
+
   /** Returns the XState snapshot for an active session (null if not in memory) */
   static getSnapshot(sessionId: string): AnyMachineSnapshot | null {
     return (actorRegistry.get(sessionId)?.getSnapshot() as AnyMachineSnapshot) ?? null;

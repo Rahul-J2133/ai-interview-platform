@@ -55,8 +55,7 @@
       "@interview/shared-types":   ["../../packages/shared-types/src/index.ts"],
       "@interview/state-machines": ["../../packages/state-machines/src/index.ts"],
       "@interview/ai-engine":      ["../../packages/ai-engine/src/index.ts"],
-      "@interview/doc-parser":     ["../../packages/doc-parser/src/index.ts"],
-      "@interview/db":             ["../../packages/db/src/index.ts"]
+      "@interview/doc-parser":     ["../../packages/doc-parser/src/index.ts"]
     },
 
     "types": ["node"]
@@ -70,7 +69,6 @@
     { "path": "../../packages/shared-types/tsconfig.json" },
     { "path": "../../packages/state-machines/tsconfig.json" },
     { "path": "../../packages/ai-engine/tsconfig.json" },
-    { "path": "../../packages/doc-parser/tsconfig.json" },
-    { "path": "../../packages/db/tsconfig.json" }
+    { "path": "../../packages/doc-parser/tsconfig.json" }
   ]
 }
