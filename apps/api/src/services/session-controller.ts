@@ -47,7 +47,7 @@ import {
   transcriptMessages,
   dimensionScores,
   userInterviewAggregates,
-} from "@interview/db";
+} from "../db/index";
 import { eq, sql } from "drizzle-orm";
 import type {
   InterviewType,
