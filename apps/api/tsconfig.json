@@ -1,26 +1,74 @@
+// {
+//   "extends": "../../tsconfig.json",
+//   "compilerOptions": {
+//     // "outDir": "./dist",
+//     // "rootDir": "./src",
+//     // "rootDir": "ai-interview-platform",
+//     "module": "ESNext",
+//     "moduleResolution": "Bundler",
+//     "target": "ESNext",
+//     "lib": ["ES2022"],
+//     "esModuleInterop": true,
+//     "allowSyntheticDefaultImports": true,
+//     "resolveJsonModule": true,
+//     "strict": true,
+//     "skipLibCheck": true,
+//     "paths": {
+//       "@interview/shared-types": ["../../packages/shared-types/src"],
+//       "@interview/db": ["../../packages/db/src"],
+//       "@interview/state-machines": ["../../packages/state-machines/src"],
+//       "@interview/ai-engine": ["../../packages/ai-engine/src"],
+//       "@interview/doc-parser": ["../../packages/doc-parser/src"]
+//     }
+//   },
+//   "include": ["src/**/*"],
+//   "exclude": ["node_modules", "dist"]
+// }
+
 {
-  "extends": "../../tsconfig.json",
+  // apps/api/tsconfig.json
+  //
+  // The API is an emit project (compiles to dist/ for production).
+  // It cannot use "allowImportingTsExtensions" — that flag requires noEmit.
+  // Instead, workspace packages are resolved via "paths" so tsx/ts-node
+  // can find them in development, and via project "references" so tsc
+  // --build uses each package's composite output.
+  //
+  // rootDir is set to "./src" explicitly to satisfy the TS6 warning.
+  // The "not under rootDir" cross-package error is prevented by project
+  // references — TypeScript typecheck referenced packages as separate
+  // programs and never pulls their source into this program's file set.
+  "extends": "../../tsconfig.base.json",
   "compilerOptions": {
-    // "outDir": "./dist",
-    // "rootDir": "./src",
-    // "rootDir": "ai-interview-platform",
-    "module": "ESNext",
-    "moduleResolution": "Bundler",
-    "target": "ESNext",
-    "lib": ["ES2022"],
-    "esModuleInterop": true,
-    "allowSyntheticDefaultImports": true,
-    "resolveJsonModule": true,
-    "strict": true,
-    "skipLibCheck": true,
+    "rootDir": "./src",
+    "outDir": "./dist",
+    "noEmit": false,
+
+    // Silence the baseUrl deprecation warning introduced in TS 5.5.
+    // baseUrl is still required when "paths" contains non-relative keys.
+    // This option is ignored at runtime — it only suppresses the diagnostic.
+    "ignoreDeprecations": "5.0",
+
+    // paths without baseUrl (TS 5.5+ preferred style).
+    // Each value is relative to the tsconfig file location (apps/api/).
     "paths": {
-      "@interview/shared-types": ["../../packages/shared-types/src"],
-      "@interview/db": ["../../packages/db/src"],
-      "@interview/state-machines": ["../../packages/state-machines/src"],
-      "@interview/ai-engine": ["../../packages/ai-engine/src"],
-      "@interview/doc-parser": ["../../packages/doc-parser/src"]
-    }
+      "@interview/shared-types":   ["../../packages/shared-types/src/index.ts"],
+      "@interview/state-machines": ["../../packages/state-machines/src/index.ts"],
+      "@interview/ai-engine":      ["../../packages/ai-engine/src/index.ts"],
+      "@interview/doc-parser":     ["../../packages/doc-parser/src/index.ts"]
+    },
+
+    "types": ["node"]
   },
-  "include": ["src/**/*"],
-  "exclude": ["node_modules", "dist"]
+
+  "include": ["src"],
+
+  // Each path must point to the tsconfig.json file directly (not just the
+  // directory) — this is what resolves the "File not found" reference errors.
+  "references": [
+    { "path": "../../packages/shared-types/tsconfig.json" },
+    { "path": "../../packages/state-machines/tsconfig.json" },
+    { "path": "../../packages/ai-engine/tsconfig.json" },
+    { "path": "../../packages/doc-parser/tsconfig.json" }
+  ]
 }

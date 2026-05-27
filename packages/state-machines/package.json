@@ -15,5 +15,8 @@
   "dependencies": {
     "xstate": "^5.14.0",
     "@interview/shared-types": "*"
-  }
+  },
+  "scripts": {
+  "type-check": "tsc --noEmit"
+}
 }

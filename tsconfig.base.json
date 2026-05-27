@@ -1,0 +1,72 @@
+// {
+//   "compilerOptions": {
+//     "target": "ES2022",
+//     "lib": ["ES2022"],
+//     "module": "node16",
+//     "moduleResolution": "node16",
+//     "strict": true,
+//     "esModuleInterop": true,
+//     "allowSyntheticDefaultImports": true,
+//     "skipLibCheck": true,
+//     "forceConsistentCasingInFileNames": true,
+//     "resolveJsonModule": true,
+//     "declaration": true,
+//     "declarationMap": true,
+//     "sourceMap": true,
+
+//     "paths": {
+//       "@interview/shared-types": ["./packages/shared-types/src"],
+//       "@interview/db": ["./packages/db/src"],
+//       "@interview/state-machines": ["./packages/state-machines/src"],
+//       "@interview/ai-engine": ["./packages/ai-engine/src"],
+//       "@interview/doc-parser": ["./packages/doc-parser/src"]
+//     },
+
+//     "inlineSources": true,
+
+//     // Set `sourceRoot` to  "/" to strip the build path prefix
+//     // from generated source code references.
+//     // This improves issue grouping in Sentry.
+//     "sourceRoot": "/"
+//   }
+// }
+
+// npx @sentry/wizard@latest -i sourcemaps --saas --org rahul-jathvani --project node-hono
+// ..........................................................................................................................
+{
+  // tsconfig.base.json — place at the monorepo root
+  // (same directory as package.json / turbo.json)
+  //
+  // Every app and package extends this. Only truly universal options live
+  // here — nothing that conflicts between emit and no-emit projects.
+  "compilerOptions": {
+    // ── Language ─────────────────────────────────────────────────────────
+    "target": "ES2022",
+    "lib": ["ES2022"],
+    "module": "ESNext",
+    "moduleResolution": "Bundler",
+
+    // ── Interop ──────────────────────────────────────────────────────────
+    "esModuleInterop": true,
+    "allowSyntheticDefaultImports": true,
+    "forceConsistentCasingInFileNames": true,
+
+    // ── Strict ───────────────────────────────────────────────────────────
+    "strict": true,
+    "noUncheckedIndexedAccess": true,
+    "exactOptionalPropertyTypes": false,
+    "noImplicitOverride": true,
+    "noFallthroughCasesInSwitch": true,
+    "noImplicitReturns": true,
+    "noUnusedLocals": true,
+    "noUnusedParameters": true,
+
+    // ── Misc ─────────────────────────────────────────────────────────────
+    "skipLibCheck": true,
+    "resolveJsonModule": true,
+    "isolatedModules": true,
+    "declaration": true,
+    "declarationMap": true,
+    "sourceMap": true
+  }
+}

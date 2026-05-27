@@ -56,7 +56,7 @@ export default function InterviewRoom({ sessionId }: { sessionId: string }) {
     clearTimeout(silenceTimer.current);
     if (!complete && ready) {
       silenceTimer.current = setTimeout(() => {
-        sendSilence();
+        void sendSilence();
       }, SILENCE_MS);
     }
   }
@@ -106,7 +106,7 @@ export default function InterviewRoom({ sessionId }: { sessionId: string }) {
   });
 
   // Send message
-  function handleSend() {
+  async function handleSend() {
     const text = input.trim();
     if (!text || sending || !wsState.connected || complete) return;
     setSending(true);
@@ -115,15 +115,18 @@ export default function InterviewRoom({ sessionId }: { sessionId: string }) {
       ...m,
       { id: crypto.randomUUID(), role: "candidate", content: text },
     ]);
-    send(text);
-    setSending(false);
-    resetSilence();
-    // Reset textarea height
+    // Reset textarea height before awaiting so the UI feels snappy
     if (textareaRef.current) textareaRef.current.style.height = "auto";
+    try {
+      await send(text);
+    } finally {
+      setSending(false);
+    }
+    resetSilence();
   }
 
   function handleKeyDown(e: React.KeyboardEvent<HTMLTextAreaElement>) {
-    if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); handleSend(); }
+    if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); void handleSend(); }
   }
 
   function handleInputChange(e: React.ChangeEvent<HTMLTextAreaElement>) {
@@ -263,7 +266,7 @@ export default function InterviewRoom({ sessionId }: { sessionId: string }) {
                 style={{ minHeight: "44px", maxHeight: "160px" }}
               />
               <button
-                onClick={handleSend}
+                onClick={() => { void handleSend(); }}
                 disabled={!input.trim() || !ready || !wsState.connected || sending}
                 className="flex-none h-11 w-11 bg-indigo-600 hover:bg-indigo-500 disabled:bg-gray-700 disabled:cursor-not-allowed rounded-xl flex items-center justify-center transition-colors"
               >

@@ -1,0 +1,18 @@
+{
+  // packages/doc-parser/tsconfig.json
+  "extends": "../../tsconfig.base.json",
+  "compilerOptions": {
+    "composite": true,
+    "rootDir": "./src",
+    "outDir": "./dist",
+    // "noEmit": true,
+      "declaration": true,
+    "paths": {
+      "@interview/shared-types": ["../shared-types/src/index.ts"]
+    }
+  },
+  "include": ["src"],
+  "references": [
+    { "path": "../shared-types/tsconfig.json" }
+  ]
+}

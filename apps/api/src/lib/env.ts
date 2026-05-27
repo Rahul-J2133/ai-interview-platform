@@ -1,22 +1,20 @@
 /**
- * env.ts — Single source of truth for environment variables.
+ * src/lib/env.ts — production hardened
  *
- * Import this module FIRST in every file that needs env vars.
- * It calls dotenv.config() exactly once (idempotent via the
- * module cache) so subsequent imports are free no-ops.
+ * Changes from original:
+ *   - REDIS_URL added as optional (required for multi-process SSE pub/sub)
+ *   - INTERNAL_SECRET added as optional (protects /internal/health)
+ *   - DB_POOL_MAX added as optional (overrides default connection pool size)
+ *   - RESPONSE_TIMEOUT_MS added as optional (AI call timeout)
+ *   - SESSION_INIT_TIMEOUT_MS added as optional
  *
- * Usage:
- *   import { env } from "../lib/env";
- *   const url = env.DATABASE_URL;
+ * Everything else unchanged.
  */
 
 import dotenv from "dotenv";
 import path from "path";
 
-// Load .env relative to the CWD (apps/api when running `npm run dev`
-// from that workspace, or wherever turbo invokes it from).
 dotenv.config({ path: path.resolve(process.cwd(), ".env") });
-// Fallback: monorepo root (when running `turbo run dev` from root)
 dotenv.config({ path: path.resolve(process.cwd(), "../../.env"), override: false });
 
 function require_env(key: string): string {
@@ -50,6 +48,22 @@ export const env = {
   WEB_URL: optional_env("WEB_URL", "http://localhost:3000"),
   NODE_ENV: optional_env("NODE_ENV", "development"),
   LOG_LEVEL: optional_env("LOG_LEVEL", "info"),
+
+  // Redis — optional, enables multi-process SSE pub/sub and rate limit store
+  // When absent, SSE uses an in-process Map (single-process only)
+  REDIS_URL: process.env.REDIS_URL ?? null,
+
+  // Internal diagnostics endpoint secret — set to a long random string in prod
+  INTERNAL_SECRET: process.env.INTERNAL_SECRET ?? null,
+
+  // DB pool size per process (see src/db/index.ts for sizing guidance)
+  DB_POOL_MAX: parseInt(optional_env("DB_POOL_MAX", "5")),
+
+  // AI response timeout (ms) — kill hanging AI calls
+  RESPONSE_TIMEOUT_MS: parseInt(optional_env("RESPONSE_TIMEOUT_MS", "45000")),
+
+  // Session initialization timeout (ms)
+  SESSION_INIT_TIMEOUT_MS: parseInt(optional_env("SESSION_INIT_TIMEOUT_MS", "30000")),
 } as const;
 
 export type Env = typeof env;

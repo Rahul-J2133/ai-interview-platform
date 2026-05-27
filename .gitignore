@@ -42,3 +42,6 @@ packages/db/src/migrations/meta/
 
 # Test coverage
 coverage/
+
+# Sentry Config File
+.sentryclirc

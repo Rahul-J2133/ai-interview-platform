@@ -4,7 +4,7 @@ services:
   # ── POSTGRES ──────────────────────────────────────────────
   postgres:
     image: postgres:16-alpine
-    container_name: interview_postgres
+    container_name: v2interview_postgres
     restart: unless-stopped
     environment:
       POSTGRES_DB: interview_platform
@@ -23,7 +23,7 @@ services:
   # ── REDIS ─────────────────────────────────────────────────
   redis:
     image: redis:7-alpine
-    container_name: interview_redis
+    container_name: v2interview_redis
     restart: unless-stopped
     ports:
       - "6379:6379"
@@ -38,7 +38,7 @@ services:
   # ── PGADMIN (optional, dev only) ─────────────────────────
   pgadmin:
     image: dpage/pgadmin4:latest
-    container_name: interview_pgadmin
+    container_name: v2interview_pgadmin
     restart: unless-stopped
     environment:
       PGADMIN_DEFAULT_EMAIL: admin@local.dev

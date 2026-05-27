@@ -1,40 +1,83 @@
+// {
+//   "extends": "../../tsconfig.json",
+//   "compilerOptions": {
+//     "target": "ES2022",
+//     "lib": [
+//       "dom",
+//       "dom.iterable",
+//       "ES2022"
+//     ],
+//     "module": "esnext",
+//     "moduleResolution": "bundler",
+//     "jsx": "preserve",
+//     "incremental": true,
+//     "plugins": [
+//       {
+//         "name": "next"
+//       }
+//     ],
+//     "paths": {
+//       "@interview/shared-types": [
+//         "../../packages/shared-types/src"
+//       ],
+//       "@/*": [
+//         "./src/*"
+//       ]
+//     },
+//     "allowJs": true,
+//     "noEmit": true,
+//     "isolatedModules": true
+//   },
+//   "include": [
+//     "next-env.d.ts",
+//     "**/*.ts",
+//     "**/*.tsx",
+//     ".next/types/**/*.ts"
+//   ],
+//   "exclude": [
+//     "node_modules"
+//   ]
+// }
 {
-  "extends": "../../tsconfig.json",
+  // apps/web/tsconfig.json
+  "extends": "../../tsconfig.base.json",
   "compilerOptions": {
-    "target": "ES2022",
-    "lib": [
-      "dom",
-      "dom.iterable",
-      "ES2022"
-    ],
-    "module": "esnext",
-    "moduleResolution": "bundler",
     "jsx": "preserve",
-    "incremental": true,
+    "lib": [
+      "ES2022",
+      "DOM",
+      "DOM.Iterable"
+    ],
     "plugins": [
       {
         "name": "next"
       }
     ],
+    "noEmit": true,
+    "allowImportingTsExtensions": true,
+    "ignoreDeprecations": "5.0",
     "paths": {
-      "@interview/shared-types": [
-        "../../packages/shared-types/src"
-      ],
       "@/*": [
         "./src/*"
+      ],
+      "@interview/shared-types": [
+        "../../packages/shared-types/src/index.ts"
       ]
     },
     "allowJs": true,
-    "noEmit": true,
-    "isolatedModules": true
+    "incremental": true
   },
   "include": [
+    "src",
     "next-env.d.ts",
-    "**/*.ts",
-    "**/*.tsx",
     ".next/types/**/*.ts"
   ],
   "exclude": [
     "node_modules"
+  ],
+  "references": [
+    {
+      "path": "../../packages/shared-types/tsconfig.json"
+    }
   ]
 }

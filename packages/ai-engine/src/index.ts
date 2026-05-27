@@ -1,5 +1,6 @@
 /**
- * ai-engine/src/index.ts
+
+ * packages/ai-engine/src/index.ts
  *
  * All AI calls go through this module.
  * - Groq replaces Anthropic entirely.
@@ -11,6 +12,7 @@
  */
 
 import Groq from "groq-sdk";
+import ollama from "ollama";
 import { z } from "zod";
 import type {
   InterviewType,
@@ -49,12 +51,19 @@ function getGroq(): Groq {
  * llama-3.1-8b-instant      — fast, cheap for simple classification tasks
  */
 const MODELS = {
-  planner: "llama-3.3-70b-versatile",
-  interviewer: "llama-3.3-70b-versatile",
-  evaluator: "llama-3.3-70b-versatile",
-  scorer: "llama-3.3-70b-versatile",
+  planner: "llama-3.1-8b-instant",
+  interviewer: "llama-3.1-8b-instant",
+  evaluator: "llama-3.1-8b-instant",
+  scorer: "llama-3.1-8b-instant",
   classifier: "llama-3.1-8b-instant", // fast path for single-token decisions
 } as const;
+// const MODELS = {
+//   planner: "llama-3.3-70b-versatile",
+//   interviewer: "llama-3.3-70b-versatile",
+//   evaluator: "llama-3.3-70b-versatile",
+//   scorer: "llama-3.3-70b-versatile",
+//   classifier: "llama-3.1-8b-instant", // fast path for single-token decisions
+// } as const;
 
 type ModelRole = keyof typeof MODELS;
 
@@ -66,32 +75,322 @@ interface ChatMessage {
   role: "system" | "user" | "assistant";
   content: string;
 }
+import pino from "pino";
+import path from "path";
+import fs from "fs";
+import { fileURLToPath } from "url";
+
+// ============================================================
+// PINO LOGGER — singleton, writes to logs/ at monorepo root
+// ============================================================
+
+const LOG_DIR = path.resolve(
+  path.dirname(fileURLToPath(import.meta.url)),
+  "../../../logs"
+);
+
+fs.mkdirSync(LOG_DIR, { recursive: true }); // ensure folder exists (mkdir no longer handled by transport)
+
+const LOG_FILE = path.join(LOG_DIR, "ai-engine.log");
+
+// pino.transport() spawns a worker_thread — stalls silently in ESM.
+// pino.destination() writes on the same thread, sync: true flushes every line.
+const destination = pino.destination({
+  dest: LOG_FILE,
+  append: true,
+  sync: true,
+});
+
+const logger = pino(
+  {
+    level: "debug",
+    base: { service: "ai-engine" },
+    timestamp: pino.stdTimeFunctions.isoTime,
+  },
+  destination,
+);
+
+// Console output in dev (replaces pino-pretty transport)
+const isDev = process.env.NODE_ENV !== "production";
+
+// ============================================================
+// SHARED LOG FUNCTION
+// ============================================================
+
+export async function logAITransaction(params: {
+  role: ModelRole;
+  systemPrompt: string;
+  messages: ChatMessage[];
+  response: string;
+  thinking?: string;
+  provider: "groq" | "ollama";
+  model: string;
+  other?: any
+}): Promise<void> {
+  const { role, systemPrompt, messages, response, thinking, provider, model, other } = params;
+
+  const logPayload = {
+    provider,
+    model,
+    role,
+    systemPrompt,
+    messages,
+    ...(thinking ? { thinking } : {}),
+    response,
+    ...(other ? { other } : {}),
+  };
+
+  logger.debug(logPayload, "ai-transaction");
+
+  // Dev console fallback (since pino-pretty transport is removed)
+  if (isDev) {
+    console.log(`[ai-engine] ${provider}/${model} role=${role} response_len=${response.length}`);
+  }
+}
 
 // ============================================================
 // BASE AI CALL
 // ============================================================
 
-async function callAI(
+// async function callAI(
+//   role: ModelRole,
+//   systemPrompt: string,
+//   messages: ChatMessage[],
+//   maxTokens = 2048
+// ): Promise<string> {
+//   const groq = getGroq();
+
+//   const response = await groq.chat.completions.create({
+//     model: MODELS[role],
+//     max_tokens: maxTokens,
+//     messages: [
+//       { role: "system", content: systemPrompt },
+//       ...messages,
+//     ],
+//     temperature: 0.7,
+//   });
+// // ✅ correct — await the log
+//   await logGroqTransaction(role, systemPrompt, messages, response.choices[0]?.message?.content ?? "[No content]");  const text = response.choices[0]?.message?.content;
+//   if (!text) throw new Error("Groq returned empty response");
+//   return text;
+// }
+
+
+// ============================================================
+// SHARED PARSER — strips <think>…</think> from content string
+// Returns both the reasoning block and the clean response.
+// ============================================================
+
+function parseThinkingAndResponse(content: string): {
+  thinking: string;
+  response: string;
+} {
+  const match = content.match(/^<think>([\s\S]*?)<\/think>([\s\S]*)$/);
+  if (match) {
+    return {
+      thinking: (match[1] ?? "").trim(),
+      response: (match[2] ?? "").trim(),
+    };
+  }
+  return { thinking: "", response: content };
+}
+
+// ============================================================
+// GROQ callAI  ← active
+// To switch to Ollama: comment this block, uncomment the one below
+// ============================================================
+
+// let _groq: Groq | null = null;
+// function getGroq(): Groq {
+//   if (!_groq) _groq = new Groq();
+//   return _groq;
+// }
+
+// const MODELS: Record<ModelRole, string> = {
+//   // fill in your actual model strings
+//   default: "llama3-8b-8192",
+// };
+
+export async function callAI(
   role: ModelRole,
   systemPrompt: string,
   messages: ChatMessage[],
   maxTokens = 2048
 ): Promise<string> {
   const groq = getGroq();
+  const model = MODELS[role];
 
-  const response = await groq.chat.completions.create({
-    model: MODELS[role],
+  const completion = await groq.chat.completions.create({
+    model,
     max_tokens: maxTokens,
-    messages: [
-      { role: "system", content: systemPrompt },
-      ...messages,
-    ],
     temperature: 0.7,
+    messages: [{ role: "system", content: systemPrompt }, ...messages],
   });
 
-  const text = response.choices[0]?.message?.content;
-  if (!text) throw new Error("Groq returned empty response");
-  return text;
+  const raw = completion.choices[0]?.message?.content ?? "";
+  if (!raw) throw new Error("Groq returned empty response");
+
+  const { thinking, response } = parseThinkingAndResponse(raw);
+
+  await logAITransaction({
+    provider: "groq",
+    model,
+    role,
+    systemPrompt,
+    messages,
+    response: thinking ? response : raw,
+    ...(thinking ? { thinking } : {}),
+    other: completion
+  });
+
+  return thinking ? response : raw;
+}
+
+// ============================================================
+// OLLAMA callAI  ← inactive
+// To switch to Ollama: comment the Groq block above, uncomment this
+// ============================================================
+
+// export async function callAI(
+//   role: ModelRole,
+//   systemPrompt: string,
+//   messages: ChatMessage[],
+//   maxTokens = 2048
+// ): Promise<string> {
+//   const model = "llama3.2:1b";
+
+//   const completion = await ollama.chat({
+//     model,
+//     options: { num_predict: maxTokens, temperature: 0.7 },
+//     messages: [{ role: "system", content: systemPrompt }, ...messages],
+//   });
+
+//   const raw = completion.message?.content ?? "";
+//   if (!raw) throw new Error("Ollama returned empty response");
+
+//   // Format A: dedicated thinking field (e.g. deepseek-r1 via Ollama)
+//   const dedicatedThinking: string =
+//     (completion.message as unknown as Record<string, unknown>)?.thinking as string ?? "";
+//   // Format B: <think>…</think> embedded in content
+//   const { thinking: embeddedThinking, response: parsedResponse } =
+//     parseThinkingAndResponse(raw);
+
+//   const thinking = dedicatedThinking || embeddedThinking || undefined;
+//   const response = dedicatedThinking ? raw : (thinking ? parsedResponse : raw);
+
+//   await logAITransaction({
+//     provider: "ollama",
+//     model,
+//     role,
+//     systemPrompt,
+//     messages,
+//     response,
+//     ...(thinking ? { thinking } : {}),
+//   });
+
+//   return response;
+// }
+
+
+// import { createWriteStream, WriteStream } from "fs";
+// import * as path from "path";
+
+// // ============================================================
+// // SINGLETON LOG STREAM — opened once, reused for all writes
+// // ============================================================
+
+// let _logStream: WriteStream | null = null;
+
+// function getLogStream(): WriteStream {
+//   if (!_logStream || _logStream.destroyed) {
+//     const logPath = path.join(process.cwd(), "groqLogs.txt");
+//     _logStream = createWriteStream(logPath, { flags: "a", encoding: "utf8" });
+
+//     _logStream.on("error", (err) => {
+//       console.error("[Logger] Stream error:", err);
+//       _logStream = null; // reset so next call reopens it
+//     });
+//   }
+//   return _logStream;
+// }
+
+// ============================================================
+// LOG FUNCTION
+// ============================================================
+
+// async function logGroqTransaction(
+//   role: ModelRole,
+//   systemPrompt: string,
+//   messages: ChatMessage[],
+//   response: string
+// ): Promise<void> {
+//   return new Promise((resolve) => {
+//     try {
+//       const stream = getLogStream();
+//       const timestamp = new Date().toISOString();
+
+//       const logEntry =
+//         `\n============================================================\n` +
+//         `TIMESTAMP: ${timestamp}\n` +
+//         `ROLE: ${role}\n` +
+//         `SYSTEM PROMPT: ${systemPrompt}\n` +
+//         `MESSAGES: ${JSON.stringify(messages, null, 2)}\n` +
+//         `RESPONSE: ${response}\n` +
+//         `============================================================\n`;
+
+//       const ok = stream.write(logEntry, "utf8");
+
+//       if (!ok) {
+//         // backpressure — wait for drain before resolving
+//         stream.once("drain", resolve);
+//       } else {
+//         resolve();
+//       }
+//     } catch (err) {
+//       console.error("[Logger] Failed to write log:", err);
+//       resolve(); // never block the caller
+//     }
+//   });
+// }
+
+// ...............................................................................
+
+/**
+ * callAIWithRetry — wraps callAI with exponential backoff.
+ *
+ * Groq rate-limits (429) and transient 5xx errors should not fail an
+ * interview. Three retries with 500ms / 1s / 2s backoff cover the
+ * vast majority of transient failures without adding noticeable latency
+ * on the happy path.
+ *
+ * Errors that should NOT be retried (e.g. invalid request, auth failure)
+ * are re-thrown immediately on the first attempt since they won't recover.
+ */
+async function callAIWithRetry(
+  role: ModelRole,
+  systemPrompt: string,
+  messages: ChatMessage[],
+  maxTokens = 2048,
+  maxRetries = 3
+): Promise<string> {
+  let lastErr: unknown;
+  for (let attempt = 0; attempt < maxRetries; attempt++) {
+    try {
+      return await callAI(role, systemPrompt, messages, maxTokens);
+    } catch (err: unknown) {
+      lastErr = err;
+      // Don't retry on client-side errors (4xx other than 429)
+      const status = (err as { status?: number }).status;
+      if (status !== undefined && status >= 400 && status < 500 && status !== 429) {
+        throw err;
+      }
+      if (attempt < maxRetries - 1) {
+        const delayMs = 500 * Math.pow(2, attempt); // 500ms, 1s, 2s
+        await new Promise((resolve) => setTimeout(resolve, delayMs));
+      }
+    }
+  }
+  throw lastErr;
 }
 
 async function callAIStreaming(
@@ -141,8 +440,8 @@ function extractJson<T>(text: string, schema: z.ZodType<T>): T {
     startBrace === -1
       ? startBracket
       : startBracket === -1
-      ? startBrace
-      : Math.min(startBrace, startBracket);
+        ? startBrace
+        : Math.min(startBrace, startBracket);
 
   const endBrace = cleaned.lastIndexOf("}");
   const endBracket = cleaned.lastIndexOf("]");
@@ -239,7 +538,7 @@ Return this exact JSON structure:
   }]
 }`;
 
-  const text = await callAI("planner", systemPrompt, [
+  const text = await callAIWithRetry("planner", systemPrompt, [
     { role: "user", content: userMessage },
   ]);
 
@@ -279,7 +578,7 @@ Return JSON array of exactly 3 competencies:
   {"competency": "...", "question": "...", "expectedScope": "...", "starLRequired": true, "followUps": ["..."]}
 ]`;
 
-  const text = await callAI("planner", systemPrompt, [
+  const text = await callAIWithRetry("planner", systemPrompt, [
     { role: "user", content: userMessage },
   ]);
 
@@ -329,7 +628,7 @@ Return JSON array of exactly 3 domains:
   }
 ]`;
 
-  const text = await callAI("planner", systemPrompt, [
+  const text = await callAIWithRetry("planner", systemPrompt, [
     { role: "user", content: userMessage },
   ]);
 
@@ -369,7 +668,12 @@ RULES:
 - If state contains REDIRECT: redirect back to the requirement/topic that was skipped
 - If state contains NUDGE or SILENCE: say only "Take your time — feel free to think aloud."
 - Stay in character as a real interviewer. Never break the simulation.
-- Be concise. Real interviewers don't give speeches.`;
+- Be concise. Real interviewers don't give speeches.
+
+BEHAVIORAL TRAITS:
+- Never open a response with affirmations like 'Excellent', 'Great', 'Impressive', or 'That's correct'.
+- Acknowledge and pivot directly. 
+- A real interviewer says 'Got it' or just moves forward, not 'Wow, I'm impressed'.`;
 
   const messages: ChatMessage[] = ctx.transcript.map((m) => ({
     role: m.role === "interviewer" ? "assistant" : "user",
@@ -382,9 +686,22 @@ RULES:
   }
 
   if (onChunk) {
-    return callAIStreaming("interviewer", systemPrompt, messages, onChunk);
+    // Streaming cannot be transparently retried once chunks have been sent to
+    // the client. If streaming fails mid-stream, fall back to the non-streaming
+    // path so the client always gets a complete response (via the terminal frame).
+    try {
+      return await callAIStreaming("interviewer", systemPrompt, messages, onChunk);
+    } catch (streamErr: unknown) {
+      const status = (streamErr as { status?: number }).status;
+      // Only retry on transient errors (429, 5xx). Don't swallow auth failures.
+      if (status !== undefined && status >= 400 && status < 500 && status !== 429) {
+        throw streamErr;
+      }
+      // Fall back to non-streaming with retry so the terminal frame still arrives
+      return callAIWithRetry("interviewer", systemPrompt, messages);
+    }
   }
-  return callAI("interviewer", systemPrompt, messages);
+  return callAIWithRetry("interviewer", systemPrompt, messages);
 }
 
 // ============================================================
@@ -442,7 +759,7 @@ Return JSON:
   "flags": []
 }`;
 
-  const text = await callAI("evaluator", systemPrompt, [
+  const text = await callAIWithRetry("evaluator", systemPrompt, [
     { role: "user", content: userMessage },
   ]);
 
@@ -486,7 +803,7 @@ Be strict and evidence-based. RESPOND ONLY WITH VALID JSON.`;
   "overall": 0.0
 }`;
 
-  const text = await callAI("scorer", systemPrompt, [
+  const text = await callAIWithRetry("scorer", systemPrompt, [
     { role: "user", content: userMessage },
   ], 4096);
 
@@ -555,7 +872,7 @@ Return JSON:
   ]
 }`;
 
-  const text = await callAI("scorer", systemPrompt, [
+  const text = await callAIWithRetry("scorer", systemPrompt, [
     { role: "user", content: userMessage },
   ], 4096);
 
@@ -600,7 +917,7 @@ Return ONLY the single word "CLARIFY" or "JUMP".
 CLARIFY = candidate is asking clarifying questions or stating assumptions before designing.
 JUMP = candidate jumped straight into solution without clarifying requirements.`;
 
-  const text = await callAI(
+  const text = await callAIWithRetry(
     "classifier",
     systemPrompt,
     [{ role: "user", content: candidateResponse.slice(0, 500) }],
@@ -630,7 +947,7 @@ List any factual misconceptions in the candidate's answer.
 Return ONLY a JSON array of strings: ["misconception 1", ...] or [] if none.
 Be strict — only flag clear technical errors, not opinions or style choices.`;
 
-  const text = await callAI(
+  const text = await callAIWithRetry(
     "classifier",
     systemPrompt,
     [{ role: "user", content: answer.slice(0, 1000) }],
@@ -693,7 +1010,7 @@ RESPOND ONLY WITH VALID JSON.`;
     learning: z.number().min(0).max(1).optional(),
   });
 
-  const text = await callAI(
+  const text = await callAIWithRetry(
     "evaluator",
     systemPrompt,
     [{ role: "user", content: `Competency: ${competency}\nAnswer: ${answer}\n\nReturn: {"situation":0.0,"task":0.0,"action":0.0,"result":0.0}` }],
@@ -737,7 +1054,7 @@ Scoring guide:
 0.2 = Refused to engage or became defensive
 0.0 = Ignored the challenge entirely`;
 
-  const text = await callAI(
+  const text = await callAIWithRetry(
     "classifier",
     systemPrompt,
     [{ role: "user", content: `Challenge: ${challenge}\n\nResponse: ${response}` }],
@@ -747,3 +1064,4 @@ Scoring guide:
   const score = parseFloat(text.trim().replace(/[^0-9.]/g, ""));
   return Number.isFinite(score) ? Math.max(0, Math.min(1, score)) : 0.5;
 }
+
