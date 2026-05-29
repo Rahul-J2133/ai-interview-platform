@@ -10,7 +10,6 @@
  *     leaking as unhandled rejections
  */
 
-import { env } from "../lib/env.js";
 import type { Context, Next } from "hono";
 import { db, users } from "../db/index.js";
 import { eq } from "drizzle-orm";

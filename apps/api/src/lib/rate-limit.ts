@@ -104,6 +104,7 @@ export function rateLimit(opts: RateLimitOptions): MiddlewareHandler {
     }
 
     await next();
+    return;
   };
 }
 

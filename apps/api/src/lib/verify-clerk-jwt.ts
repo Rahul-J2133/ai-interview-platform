@@ -23,6 +23,17 @@
  *     (algorithm confusion attacks)
  */
 
+// Web Crypto types (CryptoKey, JsonWebKey) live in lib.dom.d.ts which is
+// excluded in Node-only tsconfigs. Re-declare the minimal subset we need
+// so the file compiles without adding "dom" to lib (which pulls in all
+// browser globals and can conflict with Node types).
+declare global {
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  type CryptoKey = any;
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  type JsonWebKey = any;
+}
+
 import { env } from "./env.js";
 import { logger } from "./logger.js";
 

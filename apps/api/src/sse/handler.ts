@@ -52,11 +52,10 @@ import "../lib/env.js";
 import { Hono } from "hono";
 import { streamSSE } from "hono/streaming";
 import type { SSEStreamingApi } from "hono/streaming";
-import { db, interviewSessions, users } from "../db/index.js";
+import { db, interviewSessions } from "../db/index.js";
 import { eq } from "drizzle-orm";
 import { InterviewSessionController } from "../services/session-controller.js";
 import { clerkAuthMiddleware } from "../middleware/auth.js";
-import { verifyClerkJwt } from "../lib/verify-clerk-jwt.js";
 import { shutdown } from "../lib/shutdown.js";
 import { rateLimit, authKey } from "../lib/rate-limit.js";
 import { logger } from "../lib/logger.js";
@@ -290,7 +289,7 @@ sseRouter.post(
   clerkAuthMiddleware,
   async (c) => {
     const auth = c.get("auth");
-    const sessionId = c.req.param("id");
+    const sessionId = c.req.param("id") as string;
     const reqId = c.get("reqId");
 
     // Verify session ownership before issuing the nonce
@@ -506,7 +505,7 @@ sseRouter.get("/:id/stream", async (c) => {
     }
 
     // Keep the stream open until the client disconnects
-    await new Promise<void>((resolve) => stream.onAbort(resolve));
+    await new Promise<void>((resolve) => stream.onAbort(() => { resolve(); }));
   });
 });
 

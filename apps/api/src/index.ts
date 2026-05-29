@@ -58,6 +58,7 @@ app.use("*", async (c, next) => {
     );
   }
   await next();
+  return;
 });
 
 // 3. Sentry scope per request
@@ -67,6 +68,7 @@ app.use("*", async (c, next) => {
     scope.setTag("reqId", c.get("reqId"));
   });
   await next();
+  return;
 });
 
 // 4. HTTP request logging

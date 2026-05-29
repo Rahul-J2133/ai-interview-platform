@@ -271,7 +271,7 @@ documents.post(
 
       return c.json({
         data: {
-          results: results.map((r) => ({
+          results: results.map((r: { chunk: { text: string; index: number }; score: number; query: string }) => ({
             text: r.chunk.text,
             score: r.score,
             query: r.query,
